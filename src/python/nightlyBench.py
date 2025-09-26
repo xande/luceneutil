@@ -48,13 +48,9 @@ from notation import KNOWN_CHANGES
 This script runs certain benchmarks, once per day, and generates graphs so we can see performance over time:
 
   * Index all of wikipedia ~ 1 KB docs w/ 512 MB ram buffer
-
   * Run NRT perf test on this index for 30 minutes (we only plot mean/stddev reopen time)
-
   * Index all of wikipedia actual (~4 KB) docs w/ 512 MB ram buffer
-
   * Index all of wikipedia ~ 1 KB docs, flushing by specific doc count to get 5 segs per level
-
   * Run search test
 """
 
@@ -117,18 +113,51 @@ REAL = True
 
 
 def now():
+  """
+  Get the current date and time.
+  
+  Returns:
+    datetime.datetime: Current timestamp
+  """
   return datetime.datetime.now()
 
 
 def toSeconds(td):
+  """
+  Convert a timedelta object to total seconds as a float.
+  
+  Args:
+    td (datetime.timedelta): Time difference to convert
+    
+  Returns:
+    float: Total seconds including microseconds as decimal
+  """
   return td.days * 86400 + td.seconds + td.microseconds / 1000000.0
 
 
 def message(s):
+  """
+  Print a timestamped message to stdout.
+  
+  Args:
+    s (str): Message to print with timestamp prefix
+  """
   print("[%s] %s" % (now(), s))
 
 
 def runCommand(command):
+  """
+  Execute a shell command with timing and error handling.
+  
+  If REAL is True, actually executes the command and measures execution time.
+  If REAL is False, just logs what would be executed (dry-run mode).
+  
+  Args:
+    command (str): Shell command to execute
+    
+  Raises:
+    RuntimeError: If command execution fails (non-zero exit code)
+  """
   if REAL:
     message("RUN: %s" % command)
     t0 = time.time()
@@ -141,6 +170,29 @@ def runCommand(command):
 
 
 def buildIndex(r, runLogDir, desc, index, logFile):
+  """
+  Build a Lucene index with profiling and performance monitoring.
+  
+  This function creates a new index, cleans up any existing index at the same path,
+  runs profiling during indexing, moves log files to the run directory, and extracts
+  performance metrics from the logs.
+  
+  Args:
+    r: RunAlgs instance for running benchmarks
+    runLogDir (str): Directory to store log files for this run
+    desc (str): Description of the index being built (for logging)
+    index: Index configuration object
+    logFile (str): Name of the log file to create
+    
+  Returns:
+    tuple: (indexPath, indexTimeSec, bytesIndexed, indexAtClose, profilerResults, jfrFile)
+      - indexPath: Path to the created index
+      - indexTimeSec: Time taken to build index in seconds
+      - bytesIndexed: Number of bytes indexed
+      - indexAtClose: Index statistics at close time
+      - profilerResults: JFR profiling results
+      - jfrFile: Path to JFR profiling file
+  """
   message("build %s" % desc)
   # t0 = now()
   indexPath = benchUtil.nameToIndexPath(index.getName())
@@ -197,6 +249,20 @@ def buildIndex(r, runLogDir, desc, index, logFile):
 
 
 def checkIndex(r, indexPath, checkLogFileName):
+  """
+  Run Lucene's CheckIndex tool to verify index integrity.
+  
+  Executes CheckIndex with 16 threads at level 2 verification and checks
+  that no problems were detected. Raises an exception if any issues are found.
+  
+  Args:
+    r: RunAlgs instance (unused but kept for consistency)
+    indexPath (str): Path to the index directory to check
+    checkLogFileName (str): Path where CheckIndex output will be written
+    
+  Raises:
+    RuntimeError: If CheckIndex detects any problems with the index
+  """
   message("run CheckIndex")
   cmd = '%s -classpath "%s" -ea org.apache.lucene.index.CheckIndex -threadCount 16 -level 2 "%s" > %s 2>&1' % (
     constants.JAVA_COMMAND,
@@ -213,6 +279,22 @@ reNRTReopenTime = re.compile("^Reopen: +([0-9.]+) msec$", re.MULTILINE)
 
 
 def runNRTTest(r, indexPath, runLogDir):
+  """
+  Run Near Real-Time (NRT) performance test on an index.
+  
+  This test measures how long it takes to reopen an IndexSearcher while
+  documents are being continuously indexed. It runs for a specified duration,
+  collects reopen times, filters out warmup and outlier measurements, and
+  returns statistics.
+  
+  Args:
+    r: RunAlgs instance for running benchmarks
+    indexPath (str): Path to the index to test
+    runLogDir (str): Directory to store log files
+    
+  Returns:
+    tuple: (mean, stdDev) - Mean and standard deviation of reopen times in milliseconds
+  """
   open("body10.tasks", "w").write("Term: body:10\n")
 
   cmd = '%s -classpath "%s" perf.NRTPerfTest %s "%s" multi "%s" 17 %s %s %s %s %s update 5 no 0.0 body10.tasks' % (
@@ -256,9 +338,19 @@ def runNRTTest(r, indexPath, runLogDir):
 
 
 def validate_nightly_task_count(tasks_file, max_count):
-  """We don't want tasks to randomly shift in the nightly benchy when we add a new category
-  of tasks, as we did/saw for count(*) tasks. so we enforce here that there are NO MORE
-  than N tasks in each category in the nightly tasks file.
+  """
+  Validate that no task category exceeds the maximum allowed count.
+  
+  Prevents tasks from randomly shifting in nightly benchmarks when new task
+  categories are added. Enforces that there are no more than max_count tasks
+  in each category in the nightly tasks file.
+  
+  Args:
+    tasks_file (str): Path to the tasks file to validate
+    max_count (int): Maximum number of tasks allowed per category
+    
+  Raises:
+    RuntimeError: If any category has more than max_count tasks
   """
   re_cat_and_task = re.compile("^([^:]+): (.*?)(?:#.*)?$")
 
@@ -281,6 +373,21 @@ def validate_nightly_task_count(tasks_file, max_count):
 
 
 def run():
+  """
+  Main function that orchestrates the complete nightly benchmark suite.
+  
+  This function runs the full nightly benchmark process including:
+  - Building multiple index configurations (fast, NRT, with/without vectors)
+  - Running search benchmarks with various task categories
+  - Executing Near Real-Time (NRT) performance tests
+  - Running specialized benchmarks (KNN, facets, stored fields)
+  - Generating performance graphs and HTML reports
+  - Collecting system metrics and profiling data
+  
+  The function handles both debug mode (reduced dataset) and production mode,
+  manages log directories, validates task counts, and coordinates all benchmark
+  components to produce comprehensive performance reports.
+  """
   openPRCount, closedPRCount = countGitHubPullRequests()
 
   MEDIUM_INDEX_NUM_DOCS = constants.NIGHTLY_MEDIUM_INDEX_NUM_DOCS
@@ -952,6 +1059,15 @@ def run():
 
 
 def countGitHubPullRequests():
+  """
+  Scrape GitHub to count open and closed pull requests for Apache Lucene.
+  
+  Fetches the GitHub pulls page and extracts the counts using regex patterns.
+  These counts are used to track project activity over time in the nightly benchmarks.
+  
+  Returns:
+    tuple: (openCount, closedCount) - Number of open and closed PRs, or None if not found
+  """
   with urllib.request.urlopen("https://github.com/apache/lucene/pulls") as response:
     html = response.read().decode("utf-8")
 
@@ -973,6 +1089,20 @@ def countGitHubPullRequests():
 
 
 def findLastSuccessfulGitHashes():
+  """
+  Find the git hashes from the most recent successful nightly benchmark run.
+  
+  Searches through nightly report HTML files in reverse chronological order
+  to find the most recent successful run, then extracts the Lucene and
+  luceneutil git commit hashes from the HTML content.
+  
+  Returns:
+    tuple: (luceneGitHash, luceneUtilGitHash, logFile) - Git hashes and log file name
+           Returns None if no successful run is found
+    
+  Raises:
+    RuntimeError: If git hashes cannot be extracted from the HTML file
+  """
   # lazy -- we really just need the most recent one:
   logFiles = sorted(os.listdir(constants.NIGHTLY_REPORTS_DIR), reverse=True)
 
@@ -1005,6 +1135,22 @@ reTimeIn = re.compile(r"^\s*Time in (.*?): (\d+) ms")
 
 
 def getIndexGCTimes(subDir):
+  """
+  Extract garbage collection and JIT compilation times from indexing logs.
+  
+  Parses the fastIndexMediumDocs.log file from a compressed log archive to extract
+  timing information for GC and JIT events during indexing. Results are cached
+  in a pickle file to avoid re-parsing.
+  
+  Args:
+    subDir (str): Directory containing the logs.tar.bz2 file
+    
+  Returns:
+    dict: Mapping of timing category names to time values in seconds
+    
+  Raises:
+    RuntimeError: If tar extraction fails
+  """
   if not os.path.exists("%s/gcTimes.pk" % subDir):
     times = {}
     if os.path.exists("%s/logs.tar.bz2" % subDir):
@@ -1029,6 +1175,19 @@ reSearchStdoutLog = re.compile(r"nightly\.nightly\.\d+\.stdout")
 
 
 def getSearchGCTimes(subDir):
+  """
+  Extract garbage collection and JIT compilation times from search benchmark logs.
+  
+  Parses stdout files from search benchmark runs to extract GC and JIT timing
+  information. Aggregates times across multiple JVM runs and caches results
+  in a pickle file.
+  
+  Args:
+    subDir (str): Directory containing the logs.tar.bz2 file
+    
+  Returns:
+    dict: Mapping of timing category names to aggregated time values in seconds
+  """
   times = {}
   # print("check search gc/jit %s" % ('%s/logs.tar.bz2' % subDir))
   pk_file = "%s/search.gcjit.pk" % subDir
@@ -1060,6 +1219,19 @@ def getSearchGCTimes(subDir):
 
 
 def makeGraphs():
+  """
+  Generate all performance graphs from historical nightly benchmark data.
+  
+  This function processes all stored benchmark results to create time-series
+  charts for indexing performance, search performance, GC times, index sizes,
+  and other metrics. It reads pickled results from each nightly run directory,
+  extracts relevant metrics, and generates HTML files with interactive charts.
+  
+  The function handles data filtering to exclude known bad data points and
+  creates separate charts for different categories of benchmarks including
+  indexing throughput, search QPS, NRT latency, and specialized benchmarks
+  like stored fields and faceting.
+  """
   global annotations
   medIndexChartData = ["Date,GB/hour"]
   medIndexVectorsChartData = ["Date,GB/hour"]
@@ -1336,6 +1508,14 @@ reDateTime = re.compile("log dir /lucene/logs.nightly/(.*?)$")
 
 
 def writeCheckIndexTimeHTML():
+  """
+  Generate HTML page with CheckIndex execution time chart.
+  
+  Parses compressed log files to extract CheckIndex execution times by looking
+  at file timestamps within tar archives. Creates an interactive time-series
+  chart showing how long CheckIndex takes to verify index integrity over time.
+  Results are cached to avoid re-parsing the same log files.
+  """
   # Messy: parses the .tar.bz2 to find timestamps of each file  Once
   # LUCENE-6233 is in we can more cleanly get this from CheckIndex's output
   # instead:
@@ -1418,6 +1598,13 @@ def writeCheckIndexTimeHTML():
 
 
 def header(w, title):
+  """
+  Write HTML page header with title and required JavaScript includes.
+  
+  Args:
+    w: Write function for outputting HTML content
+    title (str): Page title to display in browser and HTML title tag
+  """
   w("<html>")
   w("<head>")
   w("<title>%s</title>" % htmlEscape(title))
@@ -1430,6 +1617,12 @@ def header(w, title):
 
 
 def footer(w):
+  """
+  Write HTML page footer with timestamp and contact information.
+  
+  Args:
+    w: Write function for outputting HTML content
+  """
   w('<br><em>[last updated: %s; send questions to <a href="mailto:lucene@mikemccandless.com">Mike McCandless</a>]</em>' % now())
   w("</div>")
   w("</body>")
@@ -1437,11 +1630,34 @@ def footer(w):
 
 
 def writeOneLine(w, seen, cat, desc):
+  """
+  Write a single HTML link line for a benchmark category.
+  
+  Adds the category to the seen set to track which categories have been
+  written, then outputs an indented HTML link to the category's results page.
+  
+  Args:
+    w: Write function for outputting HTML content
+    seen (set): Set to track which categories have been written
+    cat (str): Category name (used for filename)
+    desc (str): Human-readable description for the link text
+  """
   seen.add(cat)
   w('<br>&nbsp;&nbsp;&nbsp;&nbsp;<a href="%s.html">%s</a>' % (cat, desc))
 
 
 def writeIndexHTML(searchChartData, days):
+  """
+  Generate the main index.html page with links to all benchmark categories.
+  
+  Creates the main landing page for the nightly benchmarks with organized
+  sections for different types of benchmarks (indexing, boolean queries,
+  proximity queries, etc.) and links to individual result pages.
+  
+  Args:
+    searchChartData (dict): Dictionary of search benchmark data by category
+    days (list): List of benchmark run dates (unused but kept for compatibility)
+  """
   f = open("%s/index.html" % constants.NIGHTLY_REPORTS_DIR, "w")
   w = f.write
   header(w, "Lucene nightly benchmarks")
@@ -1658,11 +1874,32 @@ taskRename = {
 
 
 def htmlEscape(s):
+  """
+  Escape HTML special characters in a string.
+  
+  Args:
+    s (str): String to escape
+    
+  Returns:
+    str: HTML-escaped string with &, <, and > characters escaped
+  """
   return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def sort(l):
-  """Leave header (l[0]) in-place but sort the rest of the list, naturally."""
+  """
+  Sort a list while preserving the header row.
+  
+  Removes the first element (header), sorts the remaining elements,
+  then re-inserts the header at the beginning. Used for sorting
+  CSV-like data while keeping column headers intact.
+  
+  Args:
+    l (list): List to sort with header as first element
+    
+  Returns:
+    list: Sorted list with original header preserved at index 0
+  """
   x = l[0]
   del l[0]
   l.sort()
@@ -1671,6 +1908,17 @@ def sort(l):
 
 
 def writeOneGraphHTML(title, fileName, chartHTML):
+  """
+  Write a complete HTML page containing a single performance graph.
+  
+  Creates a standalone HTML page with the provided chart, including standard
+  header, footer, navigation instructions, and benchmark methodology notes.
+  
+  Args:
+    title (str): Page title and chart title
+    fileName (str): Output HTML file path
+    chartHTML (str): Pre-generated HTML content for the chart
+  """
   f = open(fileName, "w")
   w = f.write
   header(w, title)
@@ -1700,6 +1948,17 @@ def writeOneGraphHTML(title, fileName, chartHTML):
 
 
 def writeKnownChanges(w, pctOffset=77):
+  """
+  Write HTML section listing known changes that affected benchmark results.
+  
+  Creates a positioned div with a list of annotated changes that explain
+  performance variations in the benchmark results. Each change is labeled
+  with a letter and includes date and description.
+  
+  Args:
+    w: Write function for outputting HTML content
+    pctOffset (int): Vertical position percentage for the div (default 77%)
+  """
   # closed in footer()
   w('<div style="position: absolute; top: %d%%">\n' % pctOffset)
   w("<br>")
@@ -1713,6 +1972,15 @@ def writeKnownChanges(w, pctOffset=77):
 
 
 def writeSearchGCJITHTML(gcTimesChartData):
+  """
+  Generate HTML page with garbage collection and JIT compilation times during search.
+  
+  Creates a time-series chart showing how much time is spent in GC and JIT
+  compilation during search benchmarks over time.
+  
+  Args:
+    gcTimesChartData (list): Chart data with GC/JIT timing information
+  """
   with open("%s/search_gc_jit.html" % constants.NIGHTLY_REPORTS_DIR, "w") as f:
     w = f.write
     header(w, "Lucene search GC/JIT times")
@@ -1725,6 +1993,15 @@ def writeSearchGCJITHTML(gcTimesChartData):
 
 
 def writeGitHubPRChartHTML(gitHubPRChartData):
+  """
+  Generate HTML page with GitHub pull request count trends.
+  
+  Creates a time-series chart showing the number of open and closed
+  pull requests for the Apache Lucene project over time.
+  
+  Args:
+    gitHubPRChartData (list): Chart data with PR count information
+  """
   with open("%s/github_pr_counts.html" % constants.NIGHTLY_REPORTS_DIR, "w") as f:
     w = f.write
     header(w, "Lucene GitHub pull-request counts")
@@ -1739,6 +2016,17 @@ def writeGitHubPRChartHTML(gitHubPRChartData):
 
 
 def writeStoredFieldsBenchmarkHTML(storedFieldsBenchmarkData):
+  """
+  Generate HTML page with stored fields benchmark results.
+  
+  Creates charts showing index size, indexing time, and retrieval time
+  for stored fields benchmarks comparing BEST_SPEED vs BEST_COMPRESSION modes.
+  
+  Args:
+    storedFieldsBenchmarkData (dict): Dictionary containing benchmark results
+                                     with keys for "Index size", "Indexing time", 
+                                     and "Retrieval time"
+  """
   with open("%s/stored_fields_benchmarks.html" % constants.NIGHTLY_REPORTS_DIR, "w") as f:
     w = f.write
     header(w, "Lucene Stored Fields benchmarks")
@@ -1755,6 +2043,17 @@ def writeStoredFieldsBenchmarkHTML(storedFieldsBenchmarkData):
 
 
 def writeNADFacetBenchmarkHTML(nadFacetBenchmarkData):
+  """
+  Generate HTML page with National Address Database faceting benchmark results.
+  
+  Creates multiple charts showing performance metrics for high-cardinality
+  faceting operations using the NAD dataset, comparing taxonomy vs SSDV
+  (sorted set doc values) implementations.
+  
+  Args:
+    nadFacetBenchmarkData (dict): Dictionary containing faceting benchmark results
+                                 with timing data for various faceting operations
+  """
   with open("%s/nad_facet_benchmarks.html" % constants.NIGHTLY_REPORTS_DIR, "w") as f:
     w = f.write
     header(w, "National Address Database high cardinality faceting benchmarks")
@@ -1776,6 +2075,21 @@ def writeNADFacetBenchmarkHTML(nadFacetBenchmarkData):
 
 
 def writeIndexingHTML(fixedIndexSizeChartData, medChartData, medVectorsChartData, medQuantizedVectorsChartData, bigChartData, gcTimesChartData):
+  """
+  Generate HTML page with indexing performance charts.
+  
+  Creates a comprehensive page showing multiple indexing benchmarks including
+  throughput for different document sizes, vector indexing performance,
+  GC/JIT times, and index disk usage over time.
+  
+  Args:
+    fixedIndexSizeChartData (list): Index size data for the fixed search index
+    medChartData (list): Medium document indexing throughput data
+    medVectorsChartData (list): Medium document with vectors indexing data
+    medQuantizedVectorsChartData (list): Medium document with quantized vectors data
+    bigChartData (list): Big document indexing throughput data
+    gcTimesChartData (list): GC and JIT timing data during indexing
+  """
   f = open("%s/indexing.html" % constants.NIGHTLY_REPORTS_DIR, "w", encoding="utf-8")
   w = f.write
   header(w, "Lucene nightly indexing benchmark")
@@ -1845,6 +2159,16 @@ def writeIndexingHTML(fixedIndexSizeChartData, medChartData, medVectorsChartData
 
 
 def writeNRTHTML(nrtChartData):
+  """
+  Generate HTML page with Near Real-Time (NRT) latency benchmark results.
+  
+  Creates a chart showing IndexReader reopen times during continuous indexing,
+  which measures how long it takes to see newly indexed documents in search
+  results.
+  
+  Args:
+    nrtChartData (list): Chart data with NRT reopen timing measurements
+  """
   f = open("%s/nrt.html" % constants.NIGHTLY_REPORTS_DIR, "w", encoding="utf-8")
   w = f.write
   header(w, "Lucene nightly near-real-time latency benchmark")
@@ -1888,6 +2212,23 @@ onClickJS = """
 
 
 def getOneGraphHTML(id, data, yLabel, title, errorBars=True, pctOffset=5):
+  """
+  Generate HTML and JavaScript for a single interactive Dygraphs chart.
+  
+  Creates the HTML structure and JavaScript configuration for displaying
+  performance data as an interactive time-series chart using the Dygraphs library.
+  
+  Args:
+    id (str): Unique identifier for the chart element
+    data: Chart data in Dygraphs format
+    yLabel (str): Label for the Y-axis
+    title (str): Chart title to display
+    errorBars (bool): Whether to show error bars on the chart (default: True)
+    pctOffset (int): Percentage offset for chart positioning (default: 5)
+    
+  Returns:
+    str: Complete HTML string containing the chart configuration and JavaScript
+  """
   # convert data closer to separate values:
 
   # TODO: do we have any escaped commans (\,) in our data!!
@@ -2044,6 +2385,18 @@ def getOneGraphHTML(id, data, yLabel, title, errorBars=True, pctOffset=5):
 
 
 def getLabel(label):
+  """
+  Convert a numeric label to an alphabetic label (A, B, C, ..., Z, AA, AB, ...).
+  
+  Generates Excel-style column labels where 0->A, 1->B, ..., 25->Z, 26->AA, etc.
+  Used for labeling chart annotations and data series.
+  
+  Args:
+    label (int): Numeric label to convert (0-based)
+    
+  Returns:
+    str: Alphabetic label string (A, B, C, ..., Z, AA, AB, ...)
+  """
   if label < 26:
     s = chr(65 + label)
   else:
@@ -2052,6 +2405,18 @@ def getLabel(label):
 
 
 def sendEmail(toEmailAddr, subject, messageText):
+  """
+  Send an email notification using SMTP or local sendmail.
+  
+  Attempts to use SMTP with credentials from localpass module if available,
+  otherwise falls back to using the local sendmail command. Used for sending
+  benchmark completion notifications and error alerts.
+  
+  Args:
+    toEmailAddr (str): Recipient email address (can be comma-separated for multiple recipients)
+    subject (str): Email subject line
+    messageText (str): Email message body content
+  """
   try:
     import localpass
 
