@@ -77,8 +77,19 @@ PERF_STATS = constants.PERF_STATS
 osName = common.osName
 
 
-# returns an array of all java files in a directory; walks the directory tree
 def addFiles(root):
+  """
+  Recursively collect all Java files in a directory tree.
+  
+  Walks through the directory tree starting from root and collects all
+  .java files, excluding temporary files that start with ".#".
+  
+  Args:
+    root (str): Root directory path to start the search
+    
+  Returns:
+    list: List of paths to all Java files found in the directory tree
+  """
   files = []
   for f in os.listdir(root):
     f = os.path.join(root, f).replace("\\", "/")
@@ -90,12 +101,34 @@ def addFiles(root):
 
 
 def htmlColor(v):
+  """
+  Format a numeric value with HTML color coding based on sign.
+  
+  Negative values are colored red, positive values are colored green.
+  
+  Args:
+    v (float): Numeric value to format
+    
+  Returns:
+    str: HTML-formatted string with color coding
+  """
   if v < 0:
     return colorFormat(-v, "html", "red")
   return colorFormat(v, "html", "green")
 
 
 def htmlColor2(pct):
+  """
+  Format a percentage value with HTML color coding based on sign.
+  
+  Negative percentages are colored red, positive percentages are colored green.
+  
+  Args:
+    pct (float): Percentage value to format
+    
+  Returns:
+    str: HTML-formatted percentage string with color coding
+  """
   vstr = "%.2f %%" % pct
   if pct < 0:
     return colorFormat(vstr, "html", "red")
@@ -104,12 +137,35 @@ def htmlColor2(pct):
 
 
 def jiraColor(v):
+  """
+  Format a numeric value with JIRA color coding based on sign.
+  
+  Negative values are colored red, positive values are colored green.
+  
+  Args:
+    v (float): Numeric value to format
+    
+  Returns:
+    str: JIRA-formatted string with color coding
+  """
   if v < 0:
     return colorFormat(-v, "jira", "red")
   return colorFormat(v, "jira", "green")
 
 
 def pValueColor(v, form):
+  """
+  Format a p-value with color coding based on statistical significance.
+  
+  P-values <= 0.05 are colored green (significant), others are colored red.
+  
+  Args:
+    v (float): P-value to format
+    form (str): Output format ("html" or "jira")
+    
+  Returns:
+    str: Formatted p-value string with color coding
+  """
   vstr = "%.3f" % v
   if v <= 0.05:
     return colorFormat(vstr, form, "green")
@@ -117,6 +173,20 @@ def pValueColor(v, form):
 
 
 def colorFormat(value, form, color):
+  """
+  Format a value with color markup for different output formats.
+  
+  Args:
+    value: Value to format (will be converted to string)
+    form (str): Output format ("html" or "jira")
+    color (str): Color name (e.g., "red", "green")
+    
+  Returns:
+    str: Formatted string with color markup
+    
+  Raises:
+    RuntimeError: If form is not "html" or "jira"
+  """
   if form == "html":
     return f'<font color="{color}">{value}</font>'
   if form == "jira":
@@ -125,6 +195,23 @@ def colorFormat(value, form, color):
 
 
 def getArg(argName, default, hasArg=True):
+  """
+  Parse a command-line argument and remove it from sys.argv.
+  
+  Searches for argName in sys.argv and returns its value or a default.
+  The argument and its value (if hasArg=True) are removed from sys.argv.
+  
+  Args:
+    argName (str): Name of the argument to find (e.g., "-threads")
+    default: Default value to return if argument not found
+    hasArg (bool): Whether the argument takes a value (default: True)
+    
+  Returns:
+    The argument value (if hasArg=True) or True (if hasArg=False), or default if not found
+    
+  Raises:
+    RuntimeError: If the argument appears more than once
+  """
   try:
     idx = sys.argv.index(argName)
   except ValueError:
@@ -147,23 +234,86 @@ def getArg(argName, default, hasArg=True):
 
 
 def get_username():
+  """
+  Get the current user's username from the system.
+  
+  Returns:
+    str: Username of the current user
+  """
   uid = os.getuid()
   return pwd.getpwuid(uid).pw_name
 
 
 def checkoutToName(checkout):
+  """
+  Extract the name from a checkout path.
+  
+  A "checkout" is a directory containing a specific version/branch of Lucene source code
+  (e.g., "trunk" for main development, "branch_9x" for 9.x releases). This function
+  extracts just the name part from either a full path or relative name.
+  
+  Args:
+    checkout (str): Checkout path (e.g., "/path/to/trunk" or "trunk")
+    
+  Returns:
+    str: The last component of the path (e.g., "trunk")
+  """
   return checkout.split("/")[-1]
 
 
 def checkoutToPath(checkout):
+  """
+  Convert a checkout name to its full path.
+  
+  A "checkout" represents a specific version of Lucene source code. Multiple checkouts
+  allow comparing performance across different Lucene versions/branches (e.g., "trunk"
+  vs "branch_9x"). Each checkout is typically a git clone or working directory.
+  
+  If checkout contains a slash, it's treated as an absolute path.
+  Otherwise, it's treated as a relative path under BASE_DIR.
+  
+  Args:
+    checkout (str): Checkout name (e.g., "trunk") or full path
+    
+  Returns:
+    str: Full path to the checkout directory containing Lucene source
+  """
   return checkout if "/" in checkout else "%s/%s" % (constants.BASE_DIR, checkout)
 
 
 def checkoutToBenchPath(checkout):
+  """
+  Get the benchmark directory path for a checkout.
+  
+  Each Lucene checkout contains a lucene/benchmark directory with benchmark-related
+  Java classes and utilities. This function constructs the path to that directory.
+  
+  Args:
+    checkout (str): Checkout name (e.g., "trunk") or path
+    
+  Returns:
+    str: Path to the lucene/benchmark directory within the checkout
+  """
   return "%s/lucene/benchmark" % checkoutToPath(checkout)
 
 
 def checkoutToUtilPath(checkout):
+  """
+  Get the luceneutil path for a checkout.
+  
+  A "checkout" refers to a specific version/branch of the Lucene source code,
+  typically stored in separate directories under BASE_DIR (e.g., "trunk", "branch_9x").
+  This allows benchmarking different versions of Lucene side-by-side.
+  
+  Checks if the checkout has its own luceneutil directory, otherwise
+  uses the global benchmark base directory.
+  
+  Args:
+    checkout (str): Checkout name (e.g., "trunk", "branch_9x") or full path
+    
+  Returns:
+    str: Path to the luceneutil directory to use for this checkout
+  """
   p = checkoutToPath(checkout)
   if os.path.exists("%s/luceneutil" % p):
     # This checkout has a 'private' luceneutil:
@@ -174,10 +324,28 @@ def checkoutToUtilPath(checkout):
 
 
 def nameToIndexPath(name):
+  """
+  Convert an index name to its full path.
+  
+  Args:
+    name (str): Index name
+    
+  Returns:
+    str: Full path to the index directory
+  """
   return "%s/%s" % (constants.INDEX_DIR_BASE, name)
 
 
 def decode(str_or_bytes):
+  """
+  Decode bytes to string, handling both Python 2 and 3 compatibility.
+  
+  Args:
+    str_or_bytes: String or bytes object to decode
+    
+  Returns:
+    str: Decoded string
+  """
   if PYTHON_MAJOR_VER < 3 or isinstance(str_or_bytes, str):
     return str_or_bytes
   return str_or_bytes.decode("utf-8")
@@ -402,6 +570,18 @@ class PointsPKLookupTask:
 
 
 def collapseDups(hits):
+  """
+  Collapse duplicate hit values into grouped entries.
+  
+  Groups hits that have the same value together, maintaining sorted order
+  within each group.
+  
+  Args:
+    hits (list): List of (id, value) tuples
+    
+  Returns:
+    list: List of ([id_list], value) tuples where id_list contains all IDs with the same value
+  """
   newHits = []
   for id, v in hits:
     if len(newHits) == 0 or v != newHits[-1][1]:
@@ -429,6 +609,19 @@ reAvgCPUCores = re.compile("^Average CPU cores used: (-?[0-9.]+)$")
 
 
 def parse_times_line(task, line):
+  """
+  Parse a timing line and extract latency and start time.
+  
+  Parses lines in the format "X.X msec @ Y.Y msec" and sets the
+  msec and startMsec attributes on the task object.
+  
+  Args:
+    task: Task object to update with timing information
+    line (bytes): Line to parse containing timing data
+    
+  Raises:
+    RuntimeError: If the line cannot be parsed
+  """
   m = reLatencyAndStartTime.match(line.decode("utf-8"))
   if m is None:
     raise RuntimeError(f"unable to parse {line} into latency & start time")
@@ -437,6 +630,23 @@ def parse_times_line(task, line):
 
 
 def parseResults(resultsFiles):
+  """
+  Parse benchmark results from multiple result files.
+  
+  Reads and parses benchmark result files containing task performance data,
+  heap usage information, and system metrics. Handles various task types
+  including search tasks, respell tasks, and primary key lookups.
+  
+  Args:
+    resultsFiles (list): List of paths to result files to parse
+    
+  Returns:
+    tuple: (taskIters, heaps, tasksWindownMS, avgCPUCores)
+      - taskIters: List of parsed task iterations
+      - heaps: List of heap usage measurements
+      - tasksWindownMS: Task winddown time in milliseconds
+      - avgCPUCores: Average CPU cores used during benchmarking
+  """
   taskIters = []
   heaps = []
   for resultsFile in resultsFiles:
@@ -676,9 +886,19 @@ def parseResults(resultsFiles):
   return taskIters, heaps, tasksWindownMS, avgCPUCores
 
 
-# Collect task latencies segregated by categories across all the runs of the task
-# This allows calculating P50, P90, P99 and P100 latencies per task
 def collateTaskLatencies(resultIters):
+  """
+  Collect task latencies segregated by categories across all runs.
+  
+  Organizes task latencies by category and task type to enable calculation
+  of percentile latencies (P50, P90, P99, P100) for each task.
+  
+  Args:
+    resultIters (list): List of result iterations containing task results
+    
+  Returns:
+    list: List of dictionaries organized by category and task for latency analysis
+  """
   iters = []
   for results in resultIters:
     byCat = {}
@@ -699,6 +919,21 @@ def collateTaskLatencies(resultIters):
 
 
 def collateResults(resultIters):
+  """
+  Collate benchmark results by category and task type.
+  
+  Organizes benchmark results into a hierarchical structure grouped first by
+  category (Fuzzy1, Respell, etc.) and sort type, then by exact task mapping
+  to lists of runs for that task.
+  
+  Args:
+    resultIters (list): List of result iterations, each containing task results
+    
+  Returns:
+    list: List of dictionaries, each keyed by (category, sort) tuples,
+          containing (task_list, task_dict) pairs where task_dict maps
+          tasks to lists of their runs
+  """
   iters = []
   for results in resultIters:
     # Keyed first by category (Fuzzy1, Respell, ...) and 2nd be exact
@@ -724,6 +959,22 @@ def collateResults(resultIters):
 
 
 def agg(iters, cat, name, verifyCounts):
+  """
+  Aggregate benchmark results across multiple JVM iterations.
+  
+  Processes benchmark results for a specific category and task name,
+  calculating statistics across multiple JVM runs while skipping warmup
+  iterations and verifying result consistency.
+  
+  Args:
+    iters (list): List of task results by category from multiple JVM runs
+    cat: Category tuple (e.g., category name and sort type)
+    name (str): Task name to aggregate
+    verifyCounts (bool): Whether to verify hit counts are consistent
+    
+  Returns:
+    tuple: (bestAvgMS, totHitCount, accumMS) - best average time, total hits, all times
+  """
   bestAvgMS = None
   lastHitCount = None
 
@@ -837,6 +1088,19 @@ def agg(iters, cat, name, verifyCounts):
 
 
 def sum_hit_count(hc1, hc2):
+  """
+  Sum two hit count values, handling lower bound indicators.
+  
+  Hit counts can be exact numbers or lower bounds (indicated by "+" suffix).
+  This function adds two hit counts while preserving the lower bound indicator.
+  
+  Args:
+    hc1: First hit count (int, str, or str with "+" suffix)
+    hc2: Second hit count (int, str, or str with "+" suffix)
+    
+  Returns:
+    str: Sum of hit counts, with "+" suffix if either input was a lower bound
+  """
   lower_bound = False
   if isinstance(hc1, str) and hc1.endswith("+"):
     lower_bound = True
@@ -852,6 +1116,15 @@ def sum_hit_count(hc1, hc2):
 
 
 def stats(l):
+  """
+  Calculate basic statistics for a list of numbers.
+  
+  Args:
+    l (list): List of numeric values
+    
+  Returns:
+    tuple: (min, max, mean, stddev) - all as floats, returns (0,0,0,0) for empty list
+  """
   # min, max, mean, stddev
   if len(l) == 0:
     return 0.0, 0.0, 0.0, 0.0
@@ -860,6 +1133,22 @@ def stats(l):
 
 
 def run(cmd, logFile=None, indent="    ", vmstatLogFile=None, topLogFile=None):
+  """
+  Execute a command with optional logging and system monitoring.
+  
+  Runs a shell command and optionally captures output to a log file,
+  monitors system resources with vmstat, and tracks top processes.
+  
+  Args:
+    cmd (str): Command to execute
+    logFile (str, optional): Path to log file for command output
+    indent (str): Indentation for console output (default: "    ")
+    vmstatLogFile (str, optional): Path to vmstat log file
+    topLogFile (str, optional): Path to top processes log file
+    
+  Returns:
+    int: Command exit code
+  """
   print("%srun: %s, cwd=%s" % (indent, cmd, os.getcwd()))
   if logFile is not None:
     out = open(logFile, "wb")
@@ -895,7 +1184,22 @@ reCoreJar = re.compile("lucene-core-[0-9]+\\.[0-9]+\\.[0-9]+(?:-SNAPSHOT)?\\.jar
 
 
 class RunAlgs:
+  """
+  Main class for running Lucene benchmark algorithms and managing test execution.
+  
+  Handles compilation, indexing, searching, and result verification for Lucene
+  performance benchmarks across different competitors and configurations.
+  """
+  
   def __init__(self, javaCommand, verifyScores, verifyCounts):
+    """
+    Initialize the RunAlgs benchmark runner.
+    
+    Args:
+      javaCommand (str): Java command to use for running benchmarks
+      verifyScores (bool): Whether to verify search result scores match
+      verifyCounts (bool): Whether to verify hit counts match
+    """
     self.logCounter = 0
     self.results = []
     self.compiled = set()
@@ -917,6 +1221,9 @@ class RunAlgs:
     print("LOGS:\n%s" % constants.LOGS_DIR)
 
   def printEnv(self):
+    """
+    Print environment information including Java version and OS details.
+    """
     print()
     print("JAVA:\n%s" % os.popen("%s -version 2>&1" % self.javaCommand).read())
 
@@ -927,6 +1234,22 @@ class RunAlgs:
       print("OS:\n%s" % sys.platform)
 
   def makeIndex(self, id, index, printCharts=False, profilerCount=30, profilerStackSize=1):
+    """
+    Create or update a Lucene index with optional profiling.
+    
+    Builds a Lucene index from the specified configuration, with optional
+    JFR profiling at multiple stack depths for performance analysis.
+    
+    Args:
+      id (str): Identifier for this indexing run
+      index: Index configuration object containing indexing parameters
+      printCharts (bool): Whether to print profiling charts (default: False)
+      profilerCount (int): Number of top entries in profiler output (default: 30)
+      profilerStackSize: Stack depth(s) for profiling (int or tuple, default: 1)
+      
+    Returns:
+      tuple: (indexPath, logFile, profilerResults, jfrFile) containing paths and results
+    """
     # we accept a sequence of stack sizes and will re-aggregate JFR results at each
     if type(profilerStackSize) is int:
       profilerStackSize = (profilerStackSize,)
@@ -1085,6 +1408,13 @@ class RunAlgs:
     return fullIndexPath, fullLogFile, profilerResults, jfrOutput
 
   def addJars(self, cp, path):
+    """
+    Add all JAR files from a directory to the classpath.
+    
+    Args:
+      cp (list): Classpath list to append JAR files to
+      path (str): Directory path to search for JAR files
+    """
     if os.path.exists(path):
       for f in os.listdir(path):
         if f.endswith(".jar"):
@@ -1093,6 +1423,12 @@ class RunAlgs:
   compiledCheckouts = set()
 
   def compile(self, competitor):
+    """
+    Compile a competitor's Lucene checkout using Gradle.
+    
+    Args:
+      competitor: Competitor object containing checkout information
+    """
     path = checkoutToBenchPath(competitor.checkout)
     cwd = os.getcwd()
     checkoutPath = checkoutToPath(competitor.checkout)
@@ -1125,6 +1461,12 @@ class RunAlgs:
       os.chdir(cwd)
 
   def antCompile(self, competitor):
+    """
+    Compile a competitor's Lucene checkout using Ant (legacy build system).
+    
+    Args:
+      competitor: Competitor object containing checkout information
+    """
     path = checkoutToBenchPath(competitor.checkout)
     cwd = os.getcwd()
     checkoutPath = checkoutToPath(competitor.checkout)
@@ -1156,6 +1498,25 @@ class RunAlgs:
       os.chdir(cwd)
 
   def runSimpleSearchBench(self, iter, id, c, coldRun, seed, staticSeed, filter=None, taskPatterns=None):
+    """
+    Run a simple search benchmark against a competitor.
+    
+    Executes search benchmarks with optional buffer cache flushing for cold runs,
+    task filtering, and random seed control for reproducible results.
+    
+    Args:
+      iter (int): Iteration number for this benchmark run
+      id (str): Identifier for this benchmark run
+      c: Competitor object containing search configuration
+      coldRun (bool): Whether to flush OS buffer caches before running
+      seed (int): Random seed for task selection
+      staticSeed (int): Static random seed for reproducible randomization
+      filter (str, optional): Filter pattern for task selection
+      taskPatterns (list, optional): List of task patterns to include/exclude
+      
+    Returns:
+      str: Path to the log file containing benchmark results
+    """
     if coldRun:
       # flush OS buffer cache
       print("Drop buffer caches...")
@@ -1306,6 +1667,16 @@ class RunAlgs:
     return logFile
 
   def getSearchLogFiles(self, id, c):
+    """
+    Get list of search log files for all JVM iterations.
+    
+    Args:
+      id (str): Benchmark run identifier
+      c: Competitor object
+      
+    Returns:
+      list: List of paths to search log files
+    """
     logFiles = []
     for iter in range(c.competition.jvmCount):
       logFile = "%s/%s.%s.%d" % (constants.LOGS_DIR, id, c.name, iter)
@@ -1313,6 +1684,16 @@ class RunAlgs:
     return logFiles
 
   def computeTaskLatencies(self, inputList, catSet):
+    """
+    Compute latency metrics for benchmark tasks.
+    
+    Args:
+      inputList (list): List of task records with timing information
+      catSet (set): Set of categories to process
+      
+    Returns:
+      dict: Dictionary mapping categories to latency metrics
+    """
     resultLatencyMetrics = {}
     for currentRecord in inputList:
       for currentKey in currentRecord.keys():
@@ -1340,6 +1721,16 @@ class RunAlgs:
     return resultLatencyMetrics
 
   def compute_qps(self, raw_results, tasks_winddown_ms):
+    """
+    Compute queries per second (QPS) from benchmark results.
+    
+    Args:
+      raw_results (list): Raw benchmark results from multiple JVM iterations
+      tasks_winddown_ms (float): Task winddown time in milliseconds
+      
+    Returns:
+      list: List of QPS values, one per JVM iteration
+    """
     # one per JVM iteration
     qpss = []
     for tasks in raw_results:
@@ -1389,6 +1780,24 @@ class RunAlgs:
       cmp_qpss = self.compute_qps(cmpRawResults, cmpTasksWindownMS)
 
   def simpleReport(self, baseLogFiles, cmpLogFiles, jira=False, html=False, baseDesc="Standard", cmpDesc=None, writer=sys.stdout.write):
+    """
+    Generate a comparison report between baseline and candidate benchmark results.
+    
+    Parses results from both runs, verifies consistency, and generates a formatted
+    report showing performance differences with statistical significance testing.
+    
+    Args:
+      baseLogFiles (list): List of baseline benchmark log files
+      cmpLogFiles (list): List of candidate benchmark log files  
+      jira (bool): Whether to format output for JIRA (default: False)
+      html (bool): Whether to format output as HTML (default: False)
+      baseDesc (str): Description for baseline results (default: "Standard")
+      cmpDesc (str, optional): Description for candidate results
+      writer (callable): Function to write output (default: sys.stdout.write)
+      
+    Returns:
+      tuple: (resultsByCatCmp, cmpDiffs, heapStats) containing comparison results
+    """
     baseRawResults, heapBase, ignore, baseAvgCpuCores = parseResults(baseLogFiles)
     cmpRawResults, heapCmp, ignore, cmpAvgCpuCores = parseResults(cmpLogFiles)
 
@@ -1667,6 +2076,14 @@ class RunAlgs:
     return resultsByCatCmp, cmpDiffs, stats(heapCmp)
 
   def compare(self, baseline, newList, *params):
+    """
+    Compare baseline results against a list of new results.
+    
+    Args:
+      baseline: Baseline benchmark result
+      newList (list): List of new benchmark results to compare against baseline
+      *params: Additional parameters to store with the comparison
+    """
     for new in newList:
       if new.numHits != baseline.numHits:
         raise RuntimeError("baseline found %d hits but new found %d hits" % (baseline[0], new[0]))
@@ -1684,12 +2101,33 @@ class RunAlgs:
     self.results.append([baseline] + [newList] + list(params))
 
   def save(self, name):
+    """
+    Save benchmark results to a pickle file.
+    
+    Args:
+      name (str): Base name for the pickle file (will have .pk extension added)
+    """
     f = open("%s.pk" % name, "wb")
     pickle.dump(self.results, f)
     f.close()
 
 
 def getAntClassPath(checkout):
+  """
+  Build the Java classpath for an Ant-based Lucene checkout.
+  
+  Constructs the classpath for older Lucene versions that use Ant instead of Gradle.
+  Includes JAR files and compiled classes from various Lucene modules.
+  
+  Args:
+    checkout (str): Checkout name or path
+    
+  Returns:
+    tuple: Tuple of classpath entries (JAR files and class directories)
+    
+  Raises:
+    RuntimeError: If required JAR files cannot be found
+  """
   path = checkoutToPath(checkout)
   cp = []
 
@@ -1727,6 +2165,22 @@ def getAntClassPath(checkout):
 
 
 def getClassPath(checkout):
+  """
+  Build the Java classpath for a Lucene checkout.
+  
+  Constructs the classpath needed to run Lucene benchmarks, handling both
+  Gradle and Ant build systems. For Gradle builds, includes JAR files and
+  compiled classes from various Lucene modules.
+  
+  Args:
+    checkout (str): Checkout name or path
+    
+  Returns:
+    list: List of classpath entries (JAR files and class directories)
+    
+  Raises:
+    RuntimeError: If required JAR files cannot be found
+  """
   path = checkoutToPath(checkout)
   if not os.path.exists(os.path.join(path, "build.gradle")):
     return getAntClassPath(checkout)
@@ -1772,14 +2226,34 @@ def getClassPath(checkout):
 
 
 def classPathToString(cp):
+  """
+  Convert a classpath list to a platform-appropriate string.
+  
+  Args:
+    cp (list): List of classpath entries
+    
+  Returns:
+    str: Classpath string with platform-appropriate separators
+  """
   return common.pathsep().join(cp)
 
 
 reFuzzy = re.compile(r"body:(.*?)\~(.*?)$")
 
 
-# converts unit~0.7 -> unit~1
 def fixupFuzzy(query):
+  """
+  Convert fuzzy query similarity values to edit distances.
+  
+  Converts fuzzy queries from similarity format (unit~0.7) to edit distance
+  format (unit~1.0) for compatibility with different Lucene versions.
+  
+  Args:
+    query (str): Query string that may contain fuzzy terms
+    
+  Returns:
+    str: Query string with fuzzy terms converted to edit distance format
+  """
   m = reFuzzy.search(query)
   if m is not None:
     term, fuzzOrig = m.groups()
@@ -1791,6 +2265,20 @@ def fixupFuzzy(query):
 
 
 def tasksToMap(taskIters, verifyScores, verifyCounts):
+  """
+  Convert task iterations to a map for result verification.
+  
+  Creates a mapping of tasks to their results for verification purposes,
+  ensuring consistency across multiple runs and threads.
+  
+  Args:
+    taskIters (list): List of task iterations
+    verifyScores (bool): Whether to verify search result scores
+    verifyCounts (bool): Whether to verify hit counts
+    
+  Returns:
+    dict: Mapping of tasks to their results for verification
+  """
   d = {}
   if len(taskIters) > 0:
     # Make sure same task returned same results w/in this one JVM iter (self-consistent), since
@@ -1839,6 +2327,21 @@ def tasksToMap(taskIters, verifyScores, verifyCounts):
 
 
 def compareHits(r1, r2, verifyScores, verifyCounts):
+  """
+  Compare search results between two benchmark runs for verification.
+  
+  Validates that search results are consistent between runs, checking
+  hit counts, scores, and other result properties as specified.
+  
+  Args:
+    r1 (list): First set of task results
+    r2 (list): Second set of task results  
+    verifyScores (bool): Whether to verify search result scores match
+    verifyCounts (bool): Whether to verify hit counts match
+    
+  Returns:
+    tuple: (checked, onlyInD1, errors) - counts of verified, unique, and error tasks
+  """
   # TODO: must also compare facet results
 
   # Carefully compare, allowing for the addition of new tasks:
@@ -1876,10 +2379,31 @@ def compareHits(r1, r2, verifyScores, verifyCounts):
 
 
 def htmlEscape(s):
+  """
+  Escape HTML special characters in a string.
+  
+  Args:
+    s (str): String to escape
+    
+  Returns:
+    str: HTML-escaped string
+  """
   return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def getSegmentCount(indexPath):
+  """
+  Count the number of segments in a Lucene index.
+  
+  Counts segments by looking for .fdx (field data index) or .cfs (compound file)
+  files in the index directory.
+  
+  Args:
+    indexPath (str): Path to the Lucene index directory
+    
+  Returns:
+    int: Number of segments in the index
+  """
   segCount = 0
   for fileName in os.listdir(indexPath):
     if fileName.endswith(".fdx") or fileName.endswith(".cfs"):
@@ -1891,6 +2415,18 @@ reBrokenLine = re.compile("^\\ +#")
 
 
 def fixupPerfOutput(s):
+  """
+  Fix up profiler output by joining broken lines.
+  
+  Some profiler output has lines that are broken across multiple lines
+  starting with whitespace and #. This function rejoins them.
+  
+  Args:
+    s (str): Raw profiler output string
+    
+  Returns:
+    str: Fixed profiler output with rejoined lines
+  """
   lines = s.split("\n")
   linesOut = []
   for line in lines:
@@ -1902,6 +2438,22 @@ def fixupPerfOutput(s):
 
 
 def profilerOutput(javaCommand, jfrOutput, checkoutPath, profilerCount, profilerStackSize):
+  """
+  Generate profiler output from JFR (Java Flight Recorder) data.
+  
+  Processes JFR files to extract CPU and heap profiling information at
+  different stack depths using the jfr command-line tool.
+  
+  Args:
+    javaCommand (str): Java command used for profiling
+    jfrOutput (str): Path to the JFR output file
+    checkoutPath (str): Path to the checkout directory
+    profilerCount (int): Number of top entries to include in profiler output
+    profilerStackSize: Stack depth(s) for profiling (int or list of ints)
+    
+  Returns:
+    list: List of profiler result tuples (mode, stackSize, output)
+  """
   profilerResults = []
 
   for mode in "cpu", "heap":
