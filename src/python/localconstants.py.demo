@@ -1,0 +1,111 @@
+#!/usr/bin/env python
+
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""
+Demo localconstants.py for the production nightly benchmark system.
+
+This file contains the original hardcoded values used by the production
+nightly benchmark system at https://home.apache.org/~mikemccand/lucenebench/
+
+To use this file for production:
+  1. Copy or rename this file to localconstants.py
+  2. Adjust paths as needed for your environment
+
+For local development/testing, use initial_setup.py to generate a
+localconstants.py with paths appropriate for your machine.
+"""
+
+# =============================================================================
+# REQUIRED: Base directory paths
+# =============================================================================
+
+# Root directory containing all benchmark data, indices, and Lucene checkouts
+BASE_DIR = '/lucenedata'
+
+# Directory containing luceneutil checkout (this repository)
+BENCH_BASE_DIR = '/lucenedata/util'
+
+# Directory for storing benchmark indices
+INDEX_DIR_BASE = '/lucenedata/indices'
+
+# =============================================================================
+# REQUIRED: Java configuration
+# =============================================================================
+
+# Path to Java installation (JDK 21+ recommended)
+JAVA_HOME = '/usr/local/src/jdk-24'
+JAVA_EXE = f'{JAVA_HOME}/bin/java'
+JAVAC_EXE = f'{JAVA_HOME}/bin/javac'
+
+# Java command line for running benchmarks
+# Adjust heap sizes (-Xms/-Xmx) based on available RAM
+JAVA_COMMAND = f"{JAVA_EXE} -server -Xms2g -Xmx2g --add-modules jdk.incubator.vector -XX:+HeapDumpOnOutOfMemoryError -XX:+UseParallelGC"
+
+# =============================================================================
+# OPTIONAL: Vector configuration overrides
+# =============================================================================
+
+# Original production values use mpnet vectors (768 dimensions)
+# The default in constants.py now falls back to Cohere v3 (1024 dims) if mpnet doesn't exist
+# Uncomment these to force the original mpnet vectors:
+# VECTORS_DOCS_FILE = f"{BASE_DIR}/data/enwiki-20120502-lines-1k-mpnet.vec"
+# VECTORS_DIMENSIONS = 768
+
+# =============================================================================
+# OPTIONAL: Wiki data file overrides
+# =============================================================================
+
+# Original production big docs file (different from medium docs)
+# The default in constants.py now uses the same 1k file for both medium and big
+# Uncomment to use the original separate big docs file:
+# WIKI_BIG_DOCS_LINE_FILE = f"{BASE_DIR}/data/enwiki-20120502-lines-with-random-label.txt"
+
+# =============================================================================
+# OPTIONAL: Email notification settings
+# =============================================================================
+
+# Email notifications are enabled by default in production
+# Set NIGHTLY_EMAIL_ENABLED = False to disable
+NIGHTLY_EMAIL_ENABLED = True
+NIGHTLY_FROM_EMAIL = 'mail@mikemccandless.com'
+NIGHTLY_TO_EMAIL = 'mail@mikemccandless.com'
+
+# =============================================================================
+# OPTIONAL: KNN benchmark vector files
+# =============================================================================
+
+# For full 8M vector benchmarks (production), use the full Cohere v3 files:
+# Download from: https://huggingface.co/datasets/Cohere/wikipedia-22-12-en-embeddings
+# and use load_cohere_v3.py to generate the full .vec files
+# NIGHTLY_KNN_INDEX_VECTORS_FILE = f"{BASE_DIR}/data/cohere-v3-wikipedia-en-scattered-1024d.docs.vec"
+# NIGHTLY_KNN_SEARCH_VECTORS_FILE = f"{BASE_DIR}/data/cohere-v3-wikipedia-en-scattered-1024d.queries.vec"
+
+# =============================================================================
+# OPTIONAL: Geonames data file
+# =============================================================================
+
+# Path to geonames allCountries.txt for stored fields benchmark
+# Download from: http://download.geonames.org/export/dump/allCountries.zip
+GEONAMES_LINE_FILE_DOCS = f"{BASE_DIR}/data/allCountries.txt"
+
+# =============================================================================
+# OPTIONAL: Processor count
+# =============================================================================
+
+# Number of CPU cores available for benchmarking
+# Used for parallel operations
+PROCESSOR_COUNT = 128
