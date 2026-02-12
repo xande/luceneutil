@@ -284,7 +284,7 @@ def write_graph():
     for label, points in series.items():
       print(f"{label} -> {points}")
 
-  with open(f"{constants.NIGHTLY_KNN_REPORTS_DIR}/knnResults.html", "w") as f:
+  with open(f"{constants.NIGHTLY_REPORTS_DIR}/knnResults.html", "w") as f:
     f.write("""
 <html>
 <head>
