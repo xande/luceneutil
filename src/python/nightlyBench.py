@@ -35,6 +35,7 @@ import urllib.request
 # Configure SSL context for HTTPS requests
 try:
   import certifi
+
   ssl._create_default_https_context = lambda: ssl.create_default_context(cafile=certifi.where())
 except ImportError:
   # Fall back to system certificates if certifi is not available
@@ -80,8 +81,8 @@ DEBUG = False
 DO_RESET_FLAG = False
 
 # Set JAVA_HOME from localconstants.py so Gradle uses the correct Java version (if not already set)
-if constants.JAVA_HOME and 'JAVA_HOME' not in os.environ:
-  os.environ['JAVA_HOME'] = constants.JAVA_HOME
+if constants.JAVA_HOME and "JAVA_HOME" not in os.environ:
+  os.environ["JAVA_HOME"] = constants.JAVA_HOME
 
 ONLY_TASKS = False
 
@@ -378,9 +379,7 @@ def run():
   p = subprocess.run(f"{constants.JAVA_COMMAND} -XX:+PrintFlagsFinal -version", shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=True)
   open(f"{runLogDir}/java-final-flags.txt", "w").write(p.stdout)
 
-  kernel_version = os.popen("uname -a 2>&1").read().strip()
-  print(f"uname -a: {kernel_version}")
-
+  print("uname -a: %s" % os.popen("uname -a 2>&1").read().strip())
   print("lsb_release -a:\n%s" % os.popen("lsb_release -a 2>&1").read().strip())
   print("\ninstalled packages (pacman -Q):\n%s" % os.popen("pacman -Q 2>&1").read().strip())
 
@@ -406,7 +405,7 @@ def run():
     lastRevs = findLastSuccessfulGitHashes()
     if lastRevs is not None:
       lastLuceneRev, lastLuceneUtilRev, lastLogFile = lastRevs
-      print(f"last successful Lucene rev {lastLuceneRev}, luceneutil rev {lastLuceneUtilRev}")
+      print(f"last successfull Lucene rev {lastLuceneRev}, luceneutil rev {lastLuceneUtilRev}")
 
       # parse git log to see if there were any commits requesting regold
       command = ["git", "log", f"{lastLuceneRev}^..{luceneRev}"]
@@ -602,8 +601,8 @@ def run():
   if REAL:
     r.compile(c)
 
+  # stored fields benchy
   if not ONLY_TASKS and not DEBUG and not DO_RESET:
-    # stored fields benchy
     os.chdir(constants.BENCH_BASE_DIR)
     try:
       message("now run stored fields benchmark")
@@ -804,7 +803,6 @@ def run():
         w(f'\nluceneutil revision {luceneUtilRev} (<a href="https://github.com/mikemccand/luceneutil/compare/{lastLuceneUtilRev}...{luceneUtilRev}">commits since last successful run</a>)<br>')
       else:
         w(f"\nluceneutil revision {luceneUtilRev} (no changes since last successful run)<br>")
-    w(f"\nuname -a: {kernel_version}<br>")
     w("%s<br>" % javaVersion)
     w("%s<br>" % javaFullVersion)
     w("Java command-line: %s<br>" % htmlEscape(constants.JAVA_COMMAND))
@@ -939,10 +937,6 @@ def run():
 
   if os.path.exists("out.png"):
     shutil.move("out.png", "%s/%s.png" % (constants.NIGHTLY_REPORTS_DIR, timeStamp))
-    print(f"move out.png (QPSChart) -> {constants.NIGHTLY_REPORTS_DIR}/{timeStamp}.png")
-  else:
-    print("no out.png (QPSChart)!")
-
   searchResults = results
 
   print("  heaps: %s" % str(searchHeaps))
@@ -2118,11 +2112,11 @@ def getLabel(label):
 
 def sendEmail(toEmailAddr, subject, messageText):
   # Allow disabling email notifications via constants
-  if hasattr(constants, 'NIGHTLY_EMAIL_ENABLED') and not constants.NIGHTLY_EMAIL_ENABLED:
+  if hasattr(constants, "NIGHTLY_EMAIL_ENABLED") and not constants.NIGHTLY_EMAIL_ENABLED:
     return
 
   # Use configurable email addresses from constants
-  from_email = getattr(constants, 'NIGHTLY_FROM_EMAIL', 'mail@mikemccandless.com')
+  from_email = getattr(constants, "NIGHTLY_FROM_EMAIL", "mail@mikemccandless.com")
 
   try:
     import localpass
@@ -2154,11 +2148,12 @@ def sendEmail(toEmailAddr, subject, messageText):
     msg["To"] = toEmailAddr
     msg["Subject"] = subject
     p = Popen(["/usr/sbin/sendmail", "-t"], stdin=PIPE)
-    p.communicate(msg.as_string().encode('utf-8'))
+    p.communicate(msg.as_string().encode("utf-8"))
 
 
 def parse_args():
   import argparse
+
   parser = argparse.ArgumentParser(
     description="Nightly Lucene benchmark runner. Runs indexing and search benchmarks, generates performance graphs over time.",
     formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -2169,23 +2164,15 @@ Examples:
   %(prog)s -run -debug         # Run quick debug benchmark (smaller indexes)
   %(prog)s -run -reset         # Run benchmark and reset baseline results
   %(prog)s -run -debug -reset  # Debug run with baseline reset
-    """
+    """,
   )
-  parser.add_argument(
-    "-run",
-    action="store_true",
-    help="Execute the benchmark run. Without this flag, only graphs are regenerated from existing data."
-  )
+  parser.add_argument("-run", action="store_true", help="Execute the benchmark run. Without this flag, only graphs are regenerated from existing data.")
   parser.add_argument(
     "-debug",
     action="store_true",
-    help="Run in debug mode: uses smaller indexes (1/100th size), fewer JVM iterations (3 instead of 20), shorter NRT run time, and redirects logs to logs.debug/ directory."
+    help="Run in debug mode: uses smaller indexes (1/100th size), fewer JVM iterations (3 instead of 20), shorter NRT run time, and redirects logs to logs.debug/ directory.",
   )
-  parser.add_argument(
-    "-reset",
-    action="store_true",
-    help="Regold/reset the baseline results files instead of comparing against previous runs."
-  )
+  parser.add_argument("-reset", action="store_true", help="Regold/reset the baseline results files instead of comparing against previous runs.")
   return parser.parse_args()
 
 
@@ -2205,7 +2192,7 @@ if __name__ == "__main__":
     if not DEBUG and REAL:
       import socket
 
-      sendEmail(getattr(constants, 'NIGHTLY_TO_EMAIL', 'mail@mikemccandless.com'), "Nightly Lucene bench FAILED (%s)" % socket.gethostname(), "")
+      sendEmail(getattr(constants, "NIGHTLY_TO_EMAIL", "mail@mikemccandless.com"), "Nightly Lucene bench FAILED (%s)" % socket.gethostname(), "")
 
 # scp -rp /lucene/reports.nightly mike@10.17.4.9:/usr/local/apache2/htdocs
 
