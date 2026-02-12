@@ -26,13 +26,14 @@ import shutil
 import smtplib
 import ssl
 import subprocess
-import sys
 import tarfile
 import time
 import traceback
 import urllib.request
 
-# Configure SSL context for HTTPS requests
+# Configure SSL context for HTTPS requests (used by blunders.py and countGitHubPullRequests()).
+# Some environments (especially macOS, corporate proxies) fail SSL verification
+# for github.com API and blunders.io endpoints.
 try:
   import certifi
 

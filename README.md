@@ -19,12 +19,15 @@ git clone https://github.com/mikemccand/luceneutil.git util
 # 2. Create reports directory
 mkdir $LUCENE_BENCH_HOME/reports.debug $LUCENE_BENCH_HOME/reports.nightly $LUCENE_BENCH_HOME/logs.debug $LUCENE_BENCH_HOME/logs.nightly 
 
-# 3. Run the initial setup script
+# 3. Run the initial setup (uses a virtual env so certifi and other deps are available)
 cd util
-python src/python/initial_setup.py -download
+make setup
 
-# you can run with -h option for help
-python src/python/initial_setup.py -h
+# Or, if you don't want to download the large data files (~20 GB total):
+make setup-no-download
+
+# You can also run initial_setup.py directly:
+# python src/python/initial_setup.py -h
 ```
   
 In the second step, the setup procedure creates all necessary directories in the clones parent directory and downloads

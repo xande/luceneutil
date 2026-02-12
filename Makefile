@@ -17,7 +17,7 @@ PIP_INSTALL_ARGS=--disable-pip-version-check --no-input --upgrade
 VENV=${PWD}/.venv
 
 # don't behave strangely if these files exist
-.PHONY: lint format reformat tidy autofix ruff ruff-fix pyright env clean
+.PHONY: lint format reformat tidy autofix ruff ruff-fix pyright env clean setup setup-no-download
 
 # list of directories we check
 SOURCES=src/python
@@ -71,6 +71,14 @@ $(VENV)/bin/activate: requirements.txt
 	$(VENV)/bin/pip install $(PIP_INSTALL_ARGS) -r requirements.txt
 	# adjust timestamp for safety
 	touch $(VENV)/bin/activate
+
+# run initial setup (downloads benchmark data files under the venv so certifi is available)
+setup: env
+	$(VENV)/bin/python src/python/initial_setup.py -download
+
+# run initial setup without downloading data files
+setup-no-download: env
+	$(VENV)/bin/python src/python/initial_setup.py
 
 # nuke venv
 clean:

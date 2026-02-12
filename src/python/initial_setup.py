@@ -206,7 +206,9 @@ class Downloader:
 
   def download(self):
     print("    Configuring SSL context...")
-    # Handle SSL certificate configuration
+    # SSL certificate handling: some environments (especially macOS, corporate proxies)
+    # fail to verify certificates for r2.dev (Cloudflare) and other download URLs.
+    # We try certifi first, fall back to system certs, and offer --insecure-ssl as last resort.
     if self.__insecure_ssl:
       print("    Warning: Using insecure SSL context (certificate verification disabled)")
       ssl_context = ssl._create_unverified_context()  # noqa: S323 - intentional: user explicitly opted in via --insecure-ssl
