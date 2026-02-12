@@ -29,7 +29,7 @@ src/python/localconstants.py
 *.class
 *.pyc
 *.swp
-npm-debug.log 
+npm-debug.log
 target/
 local/
 tmp/
@@ -44,3 +44,6 @@ knnIndices/
 *~
 #*
 .vscode/settings.json
+
+# index files
+knn-reuse/

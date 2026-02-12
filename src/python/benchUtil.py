@@ -40,13 +40,23 @@ import QPSChart
 PERF_EXE = which("perf")
 
 if PERF_EXE is None:
-  print("no perf executable; will not collect aggregate CPU profiling data")
+  print("WARNING: no perf executable; will not collect aggregate CPU profiling data")
 else:
-  print(f"perf executable is {PERF_EXE}; will collect aggregate CPU profiling data")
+  print(f"NOTE: perf executable is {PERF_EXE}; will collect aggregate CPU profiling data")
 
 PYTHON_MAJOR_VER = sys.version_info.major
 
 VMSTAT_PATH = shutil.which("vmstat")
+if VMSTAT_PATH is None:
+  print("WARNING: no vmstat executable; will not collect system-wide CPU/IO telemetry")
+else:
+  print(f"NOTE: vmstat executable is {VMSTAT_PATH}; will collect system-wide CPU/IO telemetry")
+
+GNUPLOT_PATH = shutil.which("gnuplot")
+if GNUPLOT_PATH is None:
+  print("WARNING: no gnuplot executable; will not generate system-wide CPU/IO graphs from vmstat")
+else:
+  print(f"NOTE: gnuplot executable is {GNUPLOT_PATH}; will generate system-wide CPU/IO graphs from vmstat")
 
 if PYTHON_MAJOR_VER < 3:
   raise RuntimeError("Please run with Python 3.x!  Got: %s" % str(sys.version))
@@ -985,6 +995,9 @@ class RunAlgs:
       if index.addDVFields:
         w("-dvfields")
 
+      if index.addDVSkippers:
+        w("-addDVSkippers")
+
       if index.useCMS:
         w("-useCMS")
 
@@ -1597,6 +1610,8 @@ class RunAlgs:
         traceback.print_exc()
       else:
         print(f"Chart saved to out.png... (wd: {os.getcwd()})")
+    else:
+      print("QPSChart.supported == False")
 
     w = writer
 
@@ -1726,6 +1741,7 @@ def getAntClassPath(checkout):
   cp.append("%s/lucene/build/highlighter/classes/java" % path)
   cp.append("%s/lucene/build/codecs/classes/java" % path)
   cp.append("%s/lucene/build/queries/classes/java" % path)
+  cp.append("%s/lucene/build/spatial3d/classes/java/main" % path)
 
   # so perf.* is found:
   lib = os.path.join(checkoutToUtilPath(checkout), "lib")

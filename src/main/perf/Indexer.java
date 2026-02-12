@@ -125,21 +125,18 @@ public final class Indexer {
     }
   }
 
-  private static MergePolicy getMergePolicy(String mergePolicy, boolean useCFS, boolean useBP) {
+  private static MergePolicy getMergePolicy(String mergePolicy, boolean useBP) {
 
     MergePolicy mp;
     if (mergePolicy.equals("LogDocMergePolicy")) {
       mp = new LogDocMergePolicy();
-      mp.setNoCFSRatio(useCFS ? 1.0 : 0.0);
     } else if (mergePolicy.equals("LogByteSizeMergePolicy")) {
       mp = new LogByteSizeMergePolicy();
-      mp.setNoCFSRatio(useCFS ? 1.0 : 0.0);
     } else if (mergePolicy.equals("NoMergePolicy")) {
       mp = NoMergePolicy.INSTANCE;
     } else if (mergePolicy.equals("TieredMergePolicy")) {
       final TieredMergePolicy tmp = new TieredMergePolicy();
       //tmp.setMaxMergedSegmentMB(1000000.0);
-      tmp.setNoCFSRatio(useCFS ? 1.0 : 0.0);
       mp = tmp;
     } else {
       throw new RuntimeException("unknown MergePolicy " + mergePolicy);
@@ -336,6 +333,7 @@ public final class Indexer {
     final boolean bodyPostingsOffsets = args.getFlag("-bodyPostingsOffsets");
     final int maxConcurrentMerges = args.getInt("-maxConcurrentMerges", -1);
     final boolean addDVFields = args.getFlag("-dvfields");
+    final boolean addDVSkippers = args.getFlag("-addDVSkippers");
     final boolean doRandomCommit = args.getFlag("-randomCommit");
     final boolean useCMS = args.getFlag("-useCMS");
     final Optional<Boolean> ioThrottle = args.getOptionalBoolean("-ioThrottle");
@@ -527,7 +525,8 @@ public final class Indexer {
         iwc.setUseCompoundFile(useCFS);
 
         iwc.setMergeScheduler(getMergeScheduler(indexingFailed, useCMS, maxConcurrentMerges, ioThrottle));
-        iwc.setMergePolicy(getMergePolicy(mergePolicy, useCFS, useBP));
+        iwc.getCodec().compoundFormat().setShouldUseCompoundFile(useCFS);
+        iwc.setMergePolicy(getMergePolicy(mergePolicy, useBP));
 
         // Keep all commit points:
         if (doDeletions || doForceMerge) {
@@ -566,7 +565,7 @@ public final class Indexer {
       final Random random = new Random(17);
 
       LineFileDocs lineFileDocs = new LineFileDocs(lineFile, repeatDocs, storeBody, tvsBody, bodyPostingsOffsets, false,
-                                                   taxoWriter, facetDimMethods, facetsConfig, addDVFields,
+                                                   taxoWriter, facetDimMethods, facetsConfig, addDVFields, addDVSkippers,
                                                    vectorFile, vectorDimension, vectorEncoding);
 
       float docsPerSecPerThread = -1f;

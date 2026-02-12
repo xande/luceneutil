@@ -273,7 +273,7 @@ public class NRTPerfTest {
     System.out.println("Max merge MB/sec = " + (mergeMaxWriteMBPerSec <= 0.0 ? "unlimited" : mergeMaxWriteMBPerSec));
     final Random random = new Random(seed);
 
-    final LineFileDocs docs = new LineFileDocs(lineDocFile, true, false, false, false, false, null, Collections.emptyMap(), null, true, null, 0, null);
+    final LineFileDocs docs = new LineFileDocs(lineDocFile, true, false, false, false, false, null, Collections.emptyMap(), null, true, false, null, 0, null);
 
     final Directory dir0;
     if (dirImpl.equals("MMapDirectory")) {
@@ -327,7 +327,7 @@ public class NRTPerfTest {
     */
 
     TieredMergePolicy tmp = new TieredMergePolicy();
-    tmp.setNoCFSRatio(0.0);
+    conf.getCodec().compoundFormat().setShouldUseCompoundFile(false);
     tmp.setMaxMergedSegmentMB(1000000.0);
     //tmp.setReclaimDeletesWeight(3.0);
     //tmp.setMaxMergedSegmentMB(7000.0);
