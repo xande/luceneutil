@@ -574,8 +574,8 @@ def run():
     vectorFile=constants.VECTORS_DOCS_FILE,
     vectorDimension=constants.VECTORS_DIMENSIONS,
     vectorEncoding=constants.VECTORS_TYPE,
-    hnswThreadsPerMerge=constants.HNSW_THREADS_PER_MERGE,
-    hnswThreadPoolCount=constants.HNSW_THREAD_POOL_COUNT,
+    hnswThreadsPerMerge=constants.NIGHTLY_HNSW_THREADS_PER_MERGE,
+    hnswThreadPoolCount=constants.NIGHTLY_HNSW_THREAD_POOL_COUNT,
   )
 
   # this index is gigantic -- if a turd is leftover from a prior failed run, nuke it now!!

@@ -210,9 +210,8 @@ NIGHTLY_LOG_DIR = "%s/logs.nightly" % BASE_DIR
 # NIGHTLY_TO_EMAIL = 'your-email@example.com'
 
 # HNSW vector search configuration
-# TODO: rename HNSW_THREADS_* to NIGHTLY_HNSW_THREADS_* for clarity
-HNSW_THREADS_PER_MERGE = 1
-HNSW_THREAD_POOL_COUNT = 1
+NIGHTLY_HNSW_THREADS_PER_MERGE = 1
+NIGHTLY_HNSW_THREAD_POOL_COUNT = 1
 
 # Nightly KNN benchmark vector files (Cohere v3 Wikipedia embeddings)
 # ~39.7M doc vectors, ~1.8M query vectors (1024d)
