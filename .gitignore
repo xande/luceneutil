@@ -44,6 +44,7 @@ knnIndices/
 *~
 #*
 .vscode/settings.json
+.vscode/settings.json
 
 # index files
 knn-reuse/
