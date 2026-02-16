@@ -57,8 +57,8 @@ ruff: env
 
 # checks types
 pyright: env
-	# type-check sources with basedpyright
-	$(VENV)/bin/basedpyright $(SOURCES)
+	# type-check sources with pyright
+	$(VENV)/bin/pyright $(SOURCES)
 
 # rebuild venv if dependencies change
 env: $(VENV)/bin/activate
