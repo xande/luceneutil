@@ -89,11 +89,8 @@ ONLY_TASKS = False
 
 JFR_STACK_SIZES = (1, 2, 4, 8, 12)
 
-if DEBUG:
-  NIGHTLY_DIR = "trunk"
-  constants.GRADLE_EXE = f"{constants.BASE_DIR}/{NIGHTLY_DIR}/gradlew"
-else:
-  NIGHTLY_DIR = "trunk.nightly"
+# NIGHTLY_DIR will be set in __main__ after parsing command-line arguments
+NIGHTLY_DIR = None
 
 DIR_IMPL = "MMapDirectory"
 
@@ -2181,8 +2178,16 @@ if __name__ == "__main__":
   args = parse_args()
 
   # Update global flags based on parsed arguments
-  DEBUG = args.debug
-  DO_RESET_FLAG = args.reset
+  # Must use globals() dict to avoid "used prior to global declaration" error
+  globals()['DEBUG'] = args.debug
+  globals()['DO_RESET_FLAG'] = args.reset
+  
+  # Set NIGHTLY_DIR based on DEBUG flag
+  if args.debug:
+    globals()['NIGHTLY_DIR'] = "trunk"
+    constants.GRADLE_EXE = f"{constants.BASE_DIR}/trunk/gradlew"
+  else:
+    globals()['NIGHTLY_DIR'] = "trunk.nightly"
 
   try:
     if args.run:
@@ -2190,7 +2195,7 @@ if __name__ == "__main__":
     makeGraphs()
   except:
     traceback.print_exc()
-    if not DEBUG and REAL:
+    if not args.debug and REAL:
       import socket
 
       sendEmail(getattr(constants, "NIGHTLY_TO_EMAIL", "mail@mikemccandless.com"), "Nightly Lucene bench FAILED (%s)" % socket.gethostname(), "")
