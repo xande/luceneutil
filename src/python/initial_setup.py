@@ -55,7 +55,7 @@ INDEX_DIR_BASE = '%(index_dir_base)s'
 JAVA_HOME = '%(java_home)s'
 JAVA_EXE = '%(java_exe)s'
 JAVAC_EXE = '%(javac_exe)s'
-JAVA_COMMAND = f"{{JAVA_EXE}} -server -Xms2g -Xmx16g --add-modules jdk.incubator.vector -XX:+HeapDumpOnOutOfMemoryError -XX:+UseParallelGC"
+JAVA_COMMAND = f"{JAVA_EXE} -server -Xms2g -Xmx16g --add-modules jdk.incubator.vector -XX:+HeapDumpOnOutOfMemoryError -XX:+UseParallelGC"
 """
 
 
