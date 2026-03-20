@@ -11,7 +11,7 @@
 #     - not always the first run!  sometimes 2nd run is super-fast
 
 import argparse
-import math
+import mmap
 import multiprocessing
 import os
 import random
@@ -24,6 +24,46 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+try:
+  import numpy as np
+except ImportError:
+  np = None
+  print("\nWARNING: numpy is not importable; will skip smell_vectors\n")
+  print("Next time use the local venv: source .venv/bin/activate; python -u src/python/knnPerfTest...\n")
+
+# toggle between 'pread' and 'mmap' for concurrent random vector reads when smelling vectors -- pread is
+# maybe a bit faster?
+IO_METHOD = "pread"
+# IO_METHOD = "mmap"
+
+
+def advise_will_need(file_name, offset_bytes=0, length_bytes=0):
+  """Proactively hint to the OS to load a range of file into RAM, using the configured IO_METHOD."""
+  if not os.path.exists(file_name):
+    return
+
+  file_size = os.path.getsize(file_name)
+  if length_bytes <= 0 or offset_bytes + length_bytes > file_size:
+    length_bytes = file_size - offset_bytes
+
+  if length_bytes <= 0:
+    return
+
+  with open(file_name, "rb") as f:
+    if IO_METHOD == "pread":
+      os.posix_fadvise(f.fileno(), offset_bytes, length_bytes, os.POSIX_FADV_WILLNEED)
+    elif IO_METHOD == "mmap":
+      # map the part of the file we need
+      mm = mmap.mmap(f.fileno(), length_bytes, offset=offset_bytes, access=mmap.ACCESS_READ)
+      try:
+        mm.madvise(mmap.MADV_WILLNEED)
+      finally:
+        mm.close()
+
+
+# see also https://share.google/aimode/IDYCxtTyGhFUwC1pX for clean-ish
+# ways to use io_uring-like async io from Python
 
 import autologger
 import benchUtil
@@ -52,8 +92,7 @@ from common import getLuceneDirFromGradleProperties
 #
 # you may want to modify the following settings:
 
-# TODO: support async prorfiler (it can write JFRs as well so it'd fit right in with our simple JFR summarizer output)
-# TODO: also support new CPU time profiler (no more sleepy state bias?) in JDK 25 here: https://mostlynerdless.de/blog/2025/06/11/java-25s-new-cpu-time-profiler-1/
+# uses CPUTime sampling (newly available/experimental in Java 25, seems to work on the tasks benchmark)
 DO_PROFILING = False
 DO_PS = True
 DO_VMSTAT = True
@@ -62,6 +101,19 @@ DO_VMSTAT = True
 # instructions were executed
 # TODO: how much overhead / perf impact from this?  can we always run?
 CONFIRM_SIMD_ASM_MODE = False
+
+# set this to True to collect all HNSW traversal scores and generate a histogram
+DO_HNSW_SCORE_HISTOGRAM = False
+
+# sample 1 in every N HNSW traversal scores when building the histogram (to keep HTML size reasonable)
+HNSW_SAMPLE_EVERY_N = 100
+
+# set this to True to compute sampled all query x doc distances and generate a histogram
+DO_ALL_DISTANCES_HISTOGRAM = False
+
+# sample 1 in every N all-distances scores (sampling done in Java).
+# with 400K docs and 10K queries (4B distances), 1000 -> ~4M samples -> ~40 MB HTML
+ALL_DISTANCES_SAMPLE_EVERY_N = 1000
 
 if CONFIRM_SIMD_ASM_MODE and PERF_EXE is None:
   raise RuntimeError("CONFIRM_SIMD_ASM_MODE is True but PERF_EXE is not found; install 'perf' tool and rerun?")
@@ -120,6 +172,9 @@ PARAMS = {
   "niter": (10000,),
   # "filterStrategy": ("query-time-pre-filter", "query-time-post-filter", "index-time-filter"),
   # "filterSelectivity": ("0.5", "0.2", "0.1", "0.01",),
+  # "searchType": ("radius",),
+  # "traversalSimilarity": ("0.78", "0.8",),
+  # "resultSimilarity": ("0.8",),
 }
 
 
@@ -129,8 +184,12 @@ OUTPUT_HEADERS = [
   "netCPU",
   "avgCpuCount",
   "nDoc",
+  "searchType",
   "topK",
   "fanout",
+  "traversalSimilarity",
+  "resultSimilarity",
+  "resultCount",
   "maxConn",
   "beamWidth",
   "quantized",
@@ -164,7 +223,226 @@ def advance(ix, values):
   return False
 
 
-def smell_vectors(dim, file_name, do_check_norms=True):
+_SPARK_CHARS = " ▁▂▃▄▅▆▇█"
+_NUM_SPARK_BINS = 20
+_NUM_DIM_SAMPLE_VECS = 2000
+_THRESH_CONSTANT_STD = 1e-6
+_THRESH_SPARSE_PCT_ZEROS = 0.50
+_THRESH_SKEWED_ABS = 1.0
+_THRESH_HEAVY_TAILS_KURTOSIS = 3.0
+_THRESH_FLAT_KURTOSIS = -1.0
+_THRESH_OUTLIER_SPREAD_SIGMA = 3.0
+
+
+def _sparklines_2row(counts):
+  """Returns (top_row_str, bot_row_str) for a two-row histogram using unicode block chars.
+
+  Block chars fill from the bottom of the cell, so with 8 levels per row the two rows
+  connect seamlessly: a partial char in the top row sits at the bottom of its cell,
+  flush against the full block below it.  Total resolution: 16 height levels.
+  """
+  max_count = max(counts) if max(counts) > 0 else 1
+  top_chars = []
+  bot_chars = []
+  for c in counts:
+    level = round(c / max_count * 16)
+    if level <= 8:
+      bot_chars.append(_SPARK_CHARS[level])
+      top_chars.append(" ")
+    else:
+      bot_chars.append("█")
+      top_chars.append(_SPARK_CHARS[level - 8])
+  return "".join(top_chars), "".join(bot_chars)
+
+
+def _print_dim_line(d, mean, std, pct_zeros, counts, labels, dim_idx_width):
+  """Prints sparkline + stats, with any smell labels (with details) on separate lines below."""
+  top_row, bot_row = _sparklines_2row(counts)
+  prefix = f"  dim {d:0{dim_idx_width}d} μ={mean:+8.3f} σ={std:8.3f} zeros={pct_zeros * 100:3.0f}% "  # noqa: RUF001 sigma (std deviation) is intentional
+  print(f"{' ' * len(prefix)}[{top_row}]")
+  print(f"{prefix}[{bot_row}]")
+  indent = f"  {' ' * dim_idx_width}  "
+  for name, detail in labels:
+    print(f"{indent}-> {name}: {detail}")
+  print()
+
+
+def _read_vectors_pread(file_name, sample_indices, vec_size_bytes):
+  """Generator that issues concurrent readahead hints and yields vectors via pread."""
+  with open(file_name, "rb") as f:
+    fd = f.fileno()
+
+    # hint random access for the whole file, to suppress wasteful readahead
+    os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_RANDOM)
+
+    # concurrently send all requests to the OS as hints
+    for vec_idx in sample_indices:
+      os.posix_fadvise(fd, vec_idx * vec_size_bytes, vec_size_bytes, os.POSIX_FADV_WILLNEED)
+
+    # yield vectors; they should be pre-fetched by the kernel
+    for vec_idx in sample_indices:
+      yield vec_idx, np.frombuffer(os.pread(fd, vec_size_bytes, vec_idx * vec_size_bytes), dtype="<f4")
+
+    # hint sequential access for the subsequent (sequential) indexing test
+    os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_SEQUENTIAL)
+
+
+def _read_vectors_mmap(file_name, sample_indices, vec_size_bytes, dim):
+  """Generator that issues concurrent readahead hints and yields vectors via mmap."""
+  with open(file_name, "rb") as f:
+    # mmap.PAGESIZE is typically 4096 on Linux
+    pagesize = mmap.PAGESIZE
+
+    # map the entire file
+    mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+
+    # hint random access to the whole mmap, to suppress wasteful readahead
+    mm.madvise(mmap.MADV_RANDOM)
+
+    try:
+      # concurrently send all requests to the OS as hints
+      for vec_idx in sample_indices:
+        offset = vec_idx * vec_size_bytes
+        page_offset = (offset // pagesize) * pagesize
+        length = offset + vec_size_bytes - page_offset
+        mm.madvise(mmap.MADV_WILLNEED, page_offset, length)
+
+      # yield vectors; they should be pre-fetched by the kernel
+      for vec_idx in sample_indices:
+        offset = vec_idx * vec_size_bytes
+        yield vec_idx, np.frombuffer(mm, dtype="<f4", count=dim, offset=offset)
+
+      # hint sequential access for the subsequent (sequential) indexing test
+      mm.madvise(mmap.MADV_SEQUENTIAL)
+    finally:
+      mm.close()
+
+  print()
+
+
+def _check_dim_distributions(dim, file_name, num_vectors, vec_size_bytes):
+  """Samples vectors and computes per-dim statistics to detect degenerate dimensions."""
+  if num_vectors == 0:
+    return
+
+  num_sample = min(_NUM_DIM_SAMPLE_VECS, num_vectors)
+  sample_indices = random.sample(range(num_vectors), num_sample)
+
+  if NOISY:
+    print(f"smell: sampling {num_sample} of {num_vectors} vectors for per-dim distribution...")
+
+  # load all sampled vectors concurrently into a (num_sample, dim) float32 array
+  samples = np.empty((num_sample, dim), dtype=np.float32)
+  t0_sec = time.monotonic()
+
+  if IO_METHOD == "pread":
+    reader = _read_vectors_pread(file_name, sample_indices, vec_size_bytes)
+  elif IO_METHOD == "mmap":
+    reader = _read_vectors_mmap(file_name, sample_indices, vec_size_bytes, dim)
+  else:
+    raise ValueError(f'unknown IO_METHOD "{IO_METHOD}"')
+
+  not_norm_count = 0
+  for i, (vec_idx, vec) in enumerate(reader):
+    samples[i] = vec
+
+    # CPU work: check norm immediately as vector arrives
+    norm = np.linalg.norm(vec)
+    if not np.isclose(norm, 1.0, rtol=0.0001, atol=0.0001):
+      # print warning on new line so it doesn't get overwritten by next progress \r
+      print(f'\nWARNING: vec {vec_idx} in "{file_name}" has norm={norm} (not normalized)')
+      not_norm_count += 1
+
+    completed = i + 1
+    if completed % max(1, num_sample // 20) == 0 or completed == num_sample:
+      elapsed_sec = time.monotonic() - t0_sec
+      if NOISY:
+        print(f"\rsmell:   {completed}/{num_sample} ({100 * completed / num_sample:3.0f}%) {elapsed_sec:.1f}s", end="", flush=True)
+
+  if NOISY:
+    print()
+
+  if not_norm_count > 0:
+    print(f'WARNING: dimension or vector file name might be wrong?  {not_norm_count} of {num_sample} randomly checked vectors are not normalized in "{file_name}"')
+
+  # per-dim stats, all vectorized over axis=0, result shape: (dim,)
+  mean = samples.mean(axis=0)
+  std = samples.std(axis=0)
+  pct_zeros = (samples == 0.0).mean(axis=0)
+
+  centered = samples - mean
+  m3 = (centered**3).mean(axis=0)
+  m4 = (centered**4).mean(axis=0)
+  with np.errstate(invalid="ignore", divide="ignore"):
+    skewness = m3 / std**3
+    excess_kurtosis = m4 / std**4 - 3.0
+  # zero out stats that are undefined for constant dims
+  non_const = std > _THRESH_CONSTANT_STD
+  skewness = np.where(non_const, skewness, 0.0)
+  excess_kurtosis = np.where(non_const, excess_kurtosis, 0.0)
+
+  # OUTLIER_SPREAD: flag dims whose std is an outlier across all dims' stds
+  mean_of_stds = std.mean()
+  std_of_stds = std.std()
+
+  # per-dim histogram (loop is over dims not over samples, so it's cheap)
+  dim_counts = []
+  for d in range(dim):
+    col = samples[:, d]
+    if col.min() == col.max():
+      counts = [0] * _NUM_SPARK_BINS
+      counts[_NUM_SPARK_BINS // 2] = num_sample
+    else:
+      counts = np.histogram(col, bins=_NUM_SPARK_BINS)[0].tolist()
+    dim_counts.append(counts)
+
+  # assign labels per dim -- each label is (name, detail_string)
+  dim_labels = []
+  for d in range(dim):
+    labels = []
+
+    if std[d] <= _THRESH_CONSTANT_STD:
+      labels.append(("CONSTANT", f"std={std[d]:.6f}, threshold={_THRESH_CONSTANT_STD}"))
+
+    if pct_zeros[d] > _THRESH_SPARSE_PCT_ZEROS:
+      labels.append(("SPARSE", f"{pct_zeros[d] * 100:.1f}% zeros, threshold={_THRESH_SPARSE_PCT_ZEROS * 100:.0f}%"))
+
+    if non_const[d]:
+      if abs(skewness[d]) > _THRESH_SKEWED_ABS:
+        labels.append(("SKEWED", f"skew={skewness[d]:+.2f}, threshold=|{_THRESH_SKEWED_ABS}|"))
+      if excess_kurtosis[d] > _THRESH_HEAVY_TAILS_KURTOSIS:
+        labels.append(("HEAVY_TAILS", f"kurtosis={excess_kurtosis[d]:+.2f}, threshold>{_THRESH_HEAVY_TAILS_KURTOSIS}"))
+      if excess_kurtosis[d] < _THRESH_FLAT_KURTOSIS:
+        labels.append(("FLAT", f"kurtosis={excess_kurtosis[d]:+.2f}, threshold<{_THRESH_FLAT_KURTOSIS}"))
+
+    if std_of_stds > 0 and abs(std[d] - mean_of_stds) > _THRESH_OUTLIER_SPREAD_SIGMA * std_of_stds:
+      z = (std[d] - mean_of_stds) / std_of_stds
+      labels.append(("OUTLIER_SPREAD", f"this_std={std[d]:.4f}, mean_std={mean_of_stds:.4f}, {z:+.1f}sigma vs threshold={_THRESH_OUTLIER_SPREAD_SIGMA}sigma"))
+
+    dim_labels.append(labels)
+
+  # format and print output
+  dim_idx_width = len(str(dim - 1))
+  bad_dims = [d for d in range(dim) if len(dim_labels[d]) > 0]
+
+  elapsed_sec = time.monotonic() - t0_sec
+  if bad_dims:
+    print(f"smell: {len(bad_dims)} degenerate dim(s) found in {elapsed_sec:.1f}s:")
+    if any(name == "OUTLIER_SPREAD" for lbs in dim_labels for name, _ in lbs):
+      print(f"  (OUTLIER_SPREAD: std of all dims: μ={mean_of_stds:.3f}, σ={std_of_stds:.3f}, threshold={_THRESH_OUTLIER_SPREAD_SIGMA}σ)")  # noqa: RUF001 sigma (std deviation) is intentional
+
+    for d in bad_dims:
+      _print_dim_line(d, float(mean[d]), float(std[d]), float(pct_zeros[d]), dim_counts[d], dim_labels[d], dim_idx_width)
+
+    if NOISY:
+      print(f"smell: all {dim} dims:")
+      for d in range(dim):
+        _print_dim_line(d, float(mean[d]), float(std[d]), float(pct_zeros[d]), dim_counts[d], dim_labels[d], dim_idx_width)
+  elif NOISY:
+    print(f"smell: no degenerate dims found in {elapsed_sec:.1f}s")
+
+
+def smell_vectors(dim, file_name):
   """Runs some simple sanity checks on the vector source file, because we don't store any
   self-describing metadata in the .vec source file.
   """
@@ -180,40 +458,16 @@ def smell_vectors(dim, file_name, do_check_norms=True):
       f'vector file "{file_name}" cannot be dimension {dim}: its size is not a multiple of each vector\'s size in bytes ({vec_size_bytes}); wrong vector source file or dimensionality?'
     )
 
-  if do_check_norms:
-    struct_fmt = f"<{dim}f"
+  if np is None:
+    # no numpy
+    print("\nWARNING: numpy is not importable; will skip smell_vectors\n")
+    print("Next time use the local Python venv: make env; source .venv/bin/activate; python -u src/python/knnPerfTest...\n")
+    return
 
-    with open(file_name, "rb") as f:
-      # sanity check
-      t0 = time.time()
-      checked_count = 0
-      not_norm_count = 0
-      for i in range(100):
-        vec_idx = random.randint(0, num_vectors - 1)
-        f.seek(vec_idx * vec_size_bytes)
-        b = f.read(vec_size_bytes)
-        one_vec = struct.unpack(struct_fmt, b)
+  if NOISY:
+    print(f"smell vectors from {file_name}")
 
-        sumsq = 0
-        for i, v in enumerate(one_vec):
-          # print(f"  {i:4d}: {v:g}")
-          sumsq += v * v
-        norm_euclidean_length = math.sqrt(sumsq)
-
-        if not math.isclose(norm_euclidean_length, 1.0, rel_tol=0.0001, abs_tol=0.0001):
-          # not normalized
-          print(f'WARNING: vec {vec_idx} in "{file_name}" has norm={norm_euclidean_length} (not normalized)')
-          not_norm_count += 1
-
-        t1 = time.time()
-        checked_count += 1
-        # print(f"  {t1-t0:.1f}: vec[vec_idx] length is {norm_euclidean_length}")
-        if t1 - t0 > 1.0 and i >= 10:
-          # spend at most 1 second checking, but check at least 10 vectors
-          break
-
-      if not_norm_count:
-        print(f'WARNING: dimension or vector file name might be wrong?  {not_norm_count} of {checked_count} randomly checked vectors are not normalized in "{file_name}"')
+  _check_dim_distributions(dim, file_name, num_vectors, vec_size_bytes)
 
 
 def get_unique_log_name(log_path, sub_tool):
@@ -278,6 +532,668 @@ def print_run_summary(values):
     print(s)
 
 
+METRIC_LABELS = {
+  "dot_product": ("dot_product similarity", "higher --->"),
+  "angular": ("dot_product similarity", "higher --->"),
+  "cosine": ("cosine similarity", "higher --->"),
+  "euclidean": ("euclidean distance", "<--- lower"),
+  "mip": ("max inner product", "higher --->"),
+}
+
+
+def generate_exact_nn_histogram(scores_path, output_dir, log_base_name, metric=None):
+  """Read the binary exact NN scores file and generate an HTML histogram using Google Charts."""
+  if not os.path.exists(scores_path):
+    print(f"WARNING: exact NN scores file not found: {scores_path}")
+    return
+
+  file_size = os.path.getsize(scores_path)
+  num_floats = file_size // 4
+  if num_floats == 0:
+    print("WARNING: exact NN scores file is empty")
+    return
+
+  with open(scores_path, "rb") as f:  # noqa: FURB101
+    all_scores = struct.unpack(f"<{num_floats}f", f.read())
+
+  metric_name, direction = METRIC_LABELS.get(metric or "", ("similarity score", ""))
+
+  min_score = min(all_scores)
+  max_score = max(all_scores)
+
+  if min_score == max_score:
+    print(f"WARNING: all exact NN scores are identical ({min_score}); skipping histogram")
+    return
+
+  # Sort scores so JS can use binary search for fast range queries
+  sorted_scores = sorted(all_scores)
+
+  # Emit as a compact JSON array (6 decimal places keeps file reasonable)
+  scores_js_lines = []
+  chunk_size = 500
+  for i in range(0, len(sorted_scores), chunk_size):
+    chunk = sorted_scores[i : i + chunk_size]
+    scores_js_lines.append(",".join(f"{s:.6f}" for s in chunk))
+  scores_js = ",\n".join(scores_js_lines)
+
+  html = f"""<!DOCTYPE html>
+<html>
+  <head>
+    <script type="text/javascript" src="https://www.google.com/jsapi"></script>
+    <script type="text/javascript">
+      google.load("visualization", "1", {{packages:["corechart"]}});
+      google.setOnLoadCallback(init);
+
+      // sorted scores for fast range queries via binary search
+      var scores = [
+{scores_js}
+      ];
+      var globalMin = {min_score:.6f};
+      var globalMax = {max_score:.6f};
+      var curMin = globalMin;
+      var curMax = globalMax;
+      var chart, chartDiv;
+      var zoomStack = [];
+
+      function lowerBound(arr, val) {{
+        var lo = 0, hi = arr.length;
+        while (lo < hi) {{
+          var mid = (lo + hi) >> 1;
+          if (arr[mid] < val) lo = mid + 1; else hi = mid;
+        }}
+        return lo;
+      }}
+
+      function buildHistogram(lo, hi, numBins) {{
+        var range = hi - lo;
+        var binWidth = range / numBins;
+        var bins = new Array(numBins).fill(0);
+        var startIdx = lowerBound(scores, lo);
+        var endIdx = lowerBound(scores, hi);
+        var count = 0;
+        for (var i = startIdx; i < scores.length && scores[i] <= hi; i++) {{
+          var idx = Math.floor((scores[i] - lo) / binWidth);
+          if (idx >= numBins) idx = numBins - 1;
+          if (idx < 0) idx = 0;
+          bins[idx]++;
+          count++;
+        }}
+        return {{bins: bins, binWidth: binWidth, count: count}};
+      }}
+
+      function drawChart(lo, hi) {{
+        var numBins = 50;
+        var h = buildHistogram(lo, hi, numBins);
+        var rows = [['{metric_name} ({direction})', 'Count']];
+        for (var i = 0; i < numBins; i++) {{
+          var center = lo + (i + 0.5) * h.binWidth;
+          rows.push([center, h.bins[i]]);
+        }}
+        var data = google.visualization.arrayToDataTable(rows);
+
+        var zoomLabel = (lo === globalMin && hi === globalMax) ? '' : ' [zoomed]';
+        var options = {{
+          title: 'Exact NN {metric_name} distribution (' + h.count + ' of {num_floats} scores)' + zoomLabel,
+          legend: {{position: 'none'}},
+          hAxis: {{
+            title: '{metric_name} ({direction})',
+            viewWindow: {{min: lo, max: hi}}
+          }},
+          vAxis: {{title: 'Count'}},
+          bar: {{groupWidth: '95%'}},
+          chartArea: {{left: 80, right: 20, top: 40, bottom: 60}}
+        }};
+
+        chart.draw(data, options);
+        document.getElementById('info').innerHTML =
+          'Range: ' + lo.toFixed(6) + ' .. ' + hi.toFixed(6) +
+          ' &nbsp; Bin width: ' + h.binWidth.toFixed(6) +
+          ' &nbsp; Scores in view: ' + h.count;
+      }}
+
+      function init() {{
+        chartDiv = document.getElementById('chart_div');
+        chart = new google.visualization.ColumnChart(chartDiv);
+        drawChart(globalMin, globalMax);
+
+        // drag-to-zoom
+        var dragStart = null;
+        var overlay = document.getElementById('overlay');
+
+        chartDiv.addEventListener('mousedown', function(e) {{
+          var rect = chartDiv.getBoundingClientRect();
+          dragStart = {{x: e.clientX - rect.left, clientX: e.clientX}};
+          overlay.style.left = dragStart.x + 'px';
+          overlay.style.width = '0px';
+          overlay.style.display = 'block';
+        }});
+
+        chartDiv.addEventListener('mousemove', function(e) {{
+          if (!dragStart) return;
+          var rect = chartDiv.getBoundingClientRect();
+          var curX = e.clientX - rect.left;
+          var left = Math.min(dragStart.x, curX);
+          var width = Math.abs(curX - dragStart.x);
+          overlay.style.left = left + 'px';
+          overlay.style.width = width + 'px';
+        }});
+
+        chartDiv.addEventListener('mouseup', function(e) {{
+          if (!dragStart) return;
+          overlay.style.display = 'none';
+          var rect = chartDiv.getBoundingClientRect();
+          var endX = e.clientX - rect.left;
+          var x0 = Math.min(dragStart.x, endX);
+          var x1 = Math.max(dragStart.x, endX);
+          dragStart = null;
+
+          // need at least 5px drag to count as zoom
+          if (x1 - x0 < 5) return;
+
+          var cli = chart.getChartLayoutInterface();
+          var val0 = cli.getHAxisValue(x0);
+          var val1 = cli.getHAxisValue(x1);
+          if (val0 === null || val1 === null) return;
+          var newMin = Math.max(Math.min(val0, val1), globalMin);
+          var newMax = Math.min(Math.max(val0, val1), globalMax);
+          if (newMax - newMin < (globalMax - globalMin) * 0.001) return;
+
+          zoomStack.push({{min: curMin, max: curMax}});
+          curMin = newMin;
+          curMax = newMax;
+          drawChart(curMin, curMax);
+          document.getElementById('resetBtn').style.display = 'inline';
+          document.getElementById('backBtn').style.display = 'inline';
+        }});
+
+        document.getElementById('resetBtn').addEventListener('click', function() {{
+          zoomStack = [];
+          curMin = globalMin;
+          curMax = globalMax;
+          drawChart(curMin, curMax);
+          this.style.display = 'none';
+          document.getElementById('backBtn').style.display = 'none';
+        }});
+
+        document.getElementById('backBtn').addEventListener('click', function() {{
+          if (zoomStack.length === 0) return;
+          var prev = zoomStack.pop();
+          curMin = prev.min;
+          curMax = prev.max;
+          drawChart(curMin, curMax);
+          if (zoomStack.length === 0) {{
+            document.getElementById('resetBtn').style.display = 'none';
+            this.style.display = 'none';
+          }}
+        }});
+      }}
+    </script>
+    <style>
+      #chart_container {{ position: relative; width: 1200px; height: 600px; }}
+      #chart_div {{ width: 100%; height: 100%; }}
+      #overlay {{ position: absolute; top: 0; height: 100%; background: rgba(66,133,244,0.15);
+                  border-left: 1px solid rgba(66,133,244,0.5); border-right: 1px solid rgba(66,133,244,0.5);
+                  display: none; pointer-events: none; z-index: 10; }}
+      button {{ margin: 4px 4px 4px 0; padding: 4px 12px; }}
+    </style>
+  </head>
+  <body>
+    <div id="chart_container">
+      <div id="chart_div"></div>
+      <div id="overlay"></div>
+    </div>
+    <button id="backBtn" style="display:none">Back</button>
+    <button id="resetBtn" style="display:none">Reset zoom</button>
+    <p id="info"></p>
+    <p style="color:#888">Click and drag on the chart to zoom in. Source: {scores_path}</p>
+  </body>
+</html>
+"""
+  output_file = f"{output_dir}/{log_base_name}-knnDistanceHistogram.html"
+  with open(output_file, "w") as f:  # noqa: FURB103
+    f.write(html)
+  print(f"Wrote exact NN distance histogram to {output_file}")
+
+
+def generate_all_distances_histogram(scores_path, output_dir, log_base_name, metric=None, sample_every_n=None):
+  """Read the sampled all-distances binary file and generate an HTML histogram.
+
+  The binary format is raw little-endian float32 scores (no per-query structure).
+  """
+  if not os.path.exists(scores_path):
+    print(f"WARNING: all-distances scores file not found: {scores_path}")
+    return
+
+  file_size = os.path.getsize(scores_path)
+  num_floats = file_size // 4
+  if num_floats == 0:
+    print("WARNING: all-distances scores file is empty")
+    return
+
+  with open(scores_path, "rb") as f:  # noqa: FURB101
+    all_scores = struct.unpack(f"<{num_floats}f", f.read())
+
+  sample_label = ""
+  if sample_every_n is not None:
+    sample_label = f" (sampled 1-in-{sample_every_n})"
+
+  metric_name, direction = METRIC_LABELS.get(metric or "", ("similarity score", ""))
+
+  min_score = min(all_scores)
+  max_score = max(all_scores)
+
+  if min_score == max_score:
+    print(f"WARNING: all distances scores are identical ({min_score}); skipping histogram")
+    return
+
+  sorted_scores = sorted(all_scores)
+
+  scores_js_lines = []
+  chunk_size = 500
+  for i in range(0, len(sorted_scores), chunk_size):
+    chunk = sorted_scores[i : i + chunk_size]
+    scores_js_lines.append(",".join(f"{s:.6f}" for s in chunk))
+  scores_js = ",\n".join(scores_js_lines)
+
+  html = f"""<!DOCTYPE html>
+<html>
+  <head>
+    <script type="text/javascript" src="https://www.google.com/jsapi"></script>
+    <script type="text/javascript">
+      google.load("visualization", "1", {{packages:["corechart"]}});
+      google.setOnLoadCallback(init);
+
+      var scores = [
+{scores_js}
+      ];
+      var globalMin = {min_score:.6f};
+      var globalMax = {max_score:.6f};
+      var curMin = globalMin;
+      var curMax = globalMax;
+      var chart, chartDiv;
+      var zoomStack = [];
+
+      function lowerBound(arr, val) {{
+        var lo = 0, hi = arr.length;
+        while (lo < hi) {{
+          var mid = (lo + hi) >> 1;
+          if (arr[mid] < val) lo = mid + 1; else hi = mid;
+        }}
+        return lo;
+      }}
+
+      function buildHistogram(lo, hi, numBins) {{
+        var range = hi - lo;
+        var binWidth = range / numBins;
+        var bins = new Array(numBins).fill(0);
+        var startIdx = lowerBound(scores, lo);
+        var count = 0;
+        for (var i = startIdx; i < scores.length && scores[i] <= hi; i++) {{
+          var idx = Math.floor((scores[i] - lo) / binWidth);
+          if (idx >= numBins) idx = numBins - 1;
+          if (idx < 0) idx = 0;
+          bins[idx]++;
+          count++;
+        }}
+        return {{bins: bins, binWidth: binWidth, count: count}};
+      }}
+
+      function drawChart(lo, hi) {{
+        var numBins = 50;
+        var h = buildHistogram(lo, hi, numBins);
+        var rows = [['{metric_name} ({direction})', 'Count']];
+        for (var i = 0; i < numBins; i++) {{
+          var center = lo + (i + 0.5) * h.binWidth;
+          rows.push([center, h.bins[i]]);
+        }}
+        var data = google.visualization.arrayToDataTable(rows);
+
+        var zoomLabel = (lo === globalMin && hi === globalMax) ? '' : ' [zoomed]';
+        var options = {{
+          title: 'All query x doc distances{sample_label} (' + h.count + ' of {num_floats} scores)' + zoomLabel,
+          legend: {{position: 'none'}},
+          hAxis: {{
+            title: '{metric_name} ({direction})',
+            viewWindow: {{min: lo, max: hi}}
+          }},
+          vAxis: {{title: 'Count'}},
+          bar: {{groupWidth: '95%'}},
+          chartArea: {{left: 80, right: 20, top: 40, bottom: 60}}
+        }};
+
+        chart.draw(data, options);
+        document.getElementById('info').innerHTML =
+          'Range: ' + lo.toFixed(6) + ' .. ' + hi.toFixed(6) +
+          ' &nbsp; Bin width: ' + h.binWidth.toFixed(6) +
+          ' &nbsp; Scores in view: ' + h.count;
+      }}
+
+      function init() {{
+        chartDiv = document.getElementById('chart_div');
+        chart = new google.visualization.ColumnChart(chartDiv);
+        drawChart(globalMin, globalMax);
+
+        var dragStart = null;
+        var overlay = document.getElementById('overlay');
+
+        chartDiv.addEventListener('mousedown', function(e) {{
+          var rect = chartDiv.getBoundingClientRect();
+          dragStart = {{x: e.clientX - rect.left, clientX: e.clientX}};
+          overlay.style.left = dragStart.x + 'px';
+          overlay.style.width = '0px';
+          overlay.style.display = 'block';
+        }});
+
+        chartDiv.addEventListener('mousemove', function(e) {{
+          if (!dragStart) return;
+          var rect = chartDiv.getBoundingClientRect();
+          var curX = e.clientX - rect.left;
+          var left = Math.min(dragStart.x, curX);
+          var width = Math.abs(curX - dragStart.x);
+          overlay.style.left = left + 'px';
+          overlay.style.width = width + 'px';
+        }});
+
+        chartDiv.addEventListener('mouseup', function(e) {{
+          if (!dragStart) return;
+          overlay.style.display = 'none';
+          var rect = chartDiv.getBoundingClientRect();
+          var endX = e.clientX - rect.left;
+          var x0 = Math.min(dragStart.x, endX);
+          var x1 = Math.max(dragStart.x, endX);
+          dragStart = null;
+
+          if (x1 - x0 < 5) return;
+
+          var cli = chart.getChartLayoutInterface();
+          var val0 = cli.getHAxisValue(x0);
+          var val1 = cli.getHAxisValue(x1);
+          if (val0 === null || val1 === null) return;
+          var newMin = Math.max(Math.min(val0, val1), globalMin);
+          var newMax = Math.min(Math.max(val0, val1), globalMax);
+          if (newMax - newMin < (globalMax - globalMin) * 0.001) return;
+
+          zoomStack.push({{min: curMin, max: curMax}});
+          curMin = newMin;
+          curMax = newMax;
+          drawChart(curMin, curMax);
+          document.getElementById('resetBtn').style.display = 'inline';
+          document.getElementById('backBtn').style.display = 'inline';
+        }});
+
+        document.getElementById('resetBtn').addEventListener('click', function() {{
+          zoomStack = [];
+          curMin = globalMin;
+          curMax = globalMax;
+          drawChart(curMin, curMax);
+          this.style.display = 'none';
+          document.getElementById('backBtn').style.display = 'none';
+        }});
+
+        document.getElementById('backBtn').addEventListener('click', function() {{
+          if (zoomStack.length === 0) return;
+          var prev = zoomStack.pop();
+          curMin = prev.min;
+          curMax = prev.max;
+          drawChart(curMin, curMax);
+          if (zoomStack.length === 0) {{
+            document.getElementById('resetBtn').style.display = 'none';
+            this.style.display = 'none';
+          }}
+        }});
+      }}
+    </script>
+    <style>
+      #chart_container {{ position: relative; width: 1200px; height: 600px; }}
+      #chart_div {{ width: 100%; height: 100%; }}
+      #overlay {{ position: absolute; top: 0; height: 100%; background: rgba(66,133,244,0.15);
+                  border-left: 1px solid rgba(66,133,244,0.5); border-right: 1px solid rgba(66,133,244,0.5);
+                  display: none; pointer-events: none; z-index: 10; }}
+      button {{ margin: 4px 4px 4px 0; padding: 4px 12px; }}
+    </style>
+  </head>
+  <body>
+    <div id="chart_container">
+      <div id="chart_div"></div>
+      <div id="overlay"></div>
+    </div>
+    <button id="backBtn" style="display:none">Back</button>
+    <button id="resetBtn" style="display:none">Reset zoom</button>
+    <p id="info"></p>
+    <p style="color:#888">Click and drag on the chart to zoom in. Source: {scores_path}</p>
+  </body>
+</html>
+"""
+  output_file = f"{output_dir}/{log_base_name}-allDistancesHistogram.html"
+  with open(output_file, "w") as f:  # noqa: FURB103
+    f.write(html)
+  print(f"Wrote all-distances histogram to {output_file}")
+
+
+def generate_hnsw_traversal_histogram(scores_path, output_dir, log_base_name, metric=None):
+  """Read the HNSW traversal scores binary file and generate an HTML histogram.
+
+  The binary format is: for each query, a little-endian int32 count followed
+  by that many little-endian float32 scores.
+  """
+  if not os.path.exists(scores_path):
+    print(f"WARNING: HNSW traversal scores file not found: {scores_path}")
+    return
+
+  all_scores = []
+  total_scores = 0
+  with open(scores_path, "rb") as f:  # noqa: FURB101
+    data = f.read()
+
+  offset = 0
+  while offset < len(data):
+    count = struct.unpack_from("<i", data, offset)[0]
+    offset += 4
+    scores = struct.unpack_from(f"<{count}f", data, offset)
+    offset += count * 4
+    total_scores += count
+    all_scores.extend(scores[::HNSW_SAMPLE_EVERY_N])
+
+  num_sampled = len(all_scores)
+  print(f"HNSW traversal: {total_scores} total scores, sampled 1-in-{HNSW_SAMPLE_EVERY_N} -> {num_sampled} scores for histogram")
+  if num_sampled == 0:
+    print("WARNING: HNSW traversal scores file is empty")
+    return
+
+  metric_name, direction = METRIC_LABELS.get(metric or "", ("similarity score", ""))
+
+  min_score = min(all_scores)
+  max_score = max(all_scores)
+
+  if min_score == max_score:
+    print(f"WARNING: all HNSW traversal scores are identical ({min_score}); skipping histogram")
+    return
+
+  sorted_scores = sorted(all_scores)
+
+  scores_js_lines = []
+  chunk_size = 500
+  for i in range(0, len(sorted_scores), chunk_size):
+    chunk = sorted_scores[i : i + chunk_size]
+    scores_js_lines.append(",".join(f"{s:.6f}" for s in chunk))
+  scores_js = ",\n".join(scores_js_lines)
+
+  html = f"""<!DOCTYPE html>
+<html>
+  <head>
+    <script type="text/javascript" src="https://www.google.com/jsapi"></script>
+    <script type="text/javascript">
+      google.load("visualization", "1", {{packages:["corechart"]}});
+      google.setOnLoadCallback(init);
+
+      var scores = [
+{scores_js}
+      ];
+      var globalMin = {min_score:.6f};
+      var globalMax = {max_score:.6f};
+      var curMin = globalMin;
+      var curMax = globalMax;
+      var chart, chartDiv;
+      var zoomStack = [];
+
+      function lowerBound(arr, val) {{
+        var lo = 0, hi = arr.length;
+        while (lo < hi) {{
+          var mid = (lo + hi) >> 1;
+          if (arr[mid] < val) lo = mid + 1; else hi = mid;
+        }}
+        return lo;
+      }}
+
+      function buildHistogram(lo, hi, numBins) {{
+        var range = hi - lo;
+        var binWidth = range / numBins;
+        var bins = new Array(numBins).fill(0);
+        var startIdx = lowerBound(scores, lo);
+        var count = 0;
+        for (var i = startIdx; i < scores.length && scores[i] <= hi; i++) {{
+          var idx = Math.floor((scores[i] - lo) / binWidth);
+          if (idx >= numBins) idx = numBins - 1;
+          if (idx < 0) idx = 0;
+          bins[idx]++;
+          count++;
+        }}
+        return {{bins: bins, binWidth: binWidth, count: count}};
+      }}
+
+      function drawChart(lo, hi) {{
+        var numBins = 50;
+        var h = buildHistogram(lo, hi, numBins);
+        var rows = [['{metric_name} ({direction})', 'Count']];
+        for (var i = 0; i < numBins; i++) {{
+          var center = lo + (i + 0.5) * h.binWidth;
+          rows.push([center, h.bins[i]]);
+        }}
+        var data = google.visualization.arrayToDataTable(rows);
+
+        var zoomLabel = (lo === globalMin && hi === globalMax) ? '' : ' [zoomed]';
+        var options = {{
+          title: 'HNSW traversal {metric_name} distribution (' + h.count + ' of {num_sampled} sampled from {total_scores} total, 1-in-{HNSW_SAMPLE_EVERY_N})' + zoomLabel,
+          legend: {{position: 'none'}},
+          hAxis: {{
+            title: '{metric_name} ({direction})',
+            viewWindow: {{min: lo, max: hi}}
+          }},
+          vAxis: {{title: 'Count'}},
+          bar: {{groupWidth: '95%'}},
+          chartArea: {{left: 80, right: 20, top: 40, bottom: 60}}
+        }};
+
+        chart.draw(data, options);
+        document.getElementById('info').innerHTML =
+          'Range: ' + lo.toFixed(6) + ' .. ' + hi.toFixed(6) +
+          ' &nbsp; Bin width: ' + h.binWidth.toFixed(6) +
+          ' &nbsp; Scores in view: ' + h.count;
+      }}
+
+      function init() {{
+        chartDiv = document.getElementById('chart_div');
+        chart = new google.visualization.ColumnChart(chartDiv);
+        drawChart(globalMin, globalMax);
+
+        var dragStart = null;
+        var overlay = document.getElementById('overlay');
+
+        chartDiv.addEventListener('mousedown', function(e) {{
+          var rect = chartDiv.getBoundingClientRect();
+          dragStart = {{x: e.clientX - rect.left, clientX: e.clientX}};
+          overlay.style.left = dragStart.x + 'px';
+          overlay.style.width = '0px';
+          overlay.style.display = 'block';
+        }});
+
+        chartDiv.addEventListener('mousemove', function(e) {{
+          if (!dragStart) return;
+          var rect = chartDiv.getBoundingClientRect();
+          var curX = e.clientX - rect.left;
+          var left = Math.min(dragStart.x, curX);
+          var width = Math.abs(curX - dragStart.x);
+          overlay.style.left = left + 'px';
+          overlay.style.width = width + 'px';
+        }});
+
+        chartDiv.addEventListener('mouseup', function(e) {{
+          if (!dragStart) return;
+          overlay.style.display = 'none';
+          var rect = chartDiv.getBoundingClientRect();
+          var endX = e.clientX - rect.left;
+          var x0 = Math.min(dragStart.x, endX);
+          var x1 = Math.max(dragStart.x, endX);
+          dragStart = null;
+
+          if (x1 - x0 < 5) return;
+
+          var cli = chart.getChartLayoutInterface();
+          var val0 = cli.getHAxisValue(x0);
+          var val1 = cli.getHAxisValue(x1);
+          if (val0 === null || val1 === null) return;
+          var newMin = Math.max(Math.min(val0, val1), globalMin);
+          var newMax = Math.min(Math.max(val0, val1), globalMax);
+          if (newMax - newMin < (globalMax - globalMin) * 0.001) return;
+
+          zoomStack.push({{min: curMin, max: curMax}});
+          curMin = newMin;
+          curMax = newMax;
+          drawChart(curMin, curMax);
+          document.getElementById('resetBtn').style.display = 'inline';
+          document.getElementById('backBtn').style.display = 'inline';
+        }});
+
+        document.getElementById('resetBtn').addEventListener('click', function() {{
+          zoomStack = [];
+          curMin = globalMin;
+          curMax = globalMax;
+          drawChart(curMin, curMax);
+          this.style.display = 'none';
+          document.getElementById('backBtn').style.display = 'none';
+        }});
+
+        document.getElementById('backBtn').addEventListener('click', function() {{
+          if (zoomStack.length === 0) return;
+          var prev = zoomStack.pop();
+          curMin = prev.min;
+          curMax = prev.max;
+          drawChart(curMin, curMax);
+          if (zoomStack.length === 0) {{
+            document.getElementById('resetBtn').style.display = 'none';
+            this.style.display = 'none';
+          }}
+        }});
+      }}
+    </script>
+    <style>
+      #chart_container {{ position: relative; width: 1200px; height: 600px; }}
+      #chart_div {{ width: 100%; height: 100%; }}
+      #overlay {{ position: absolute; top: 0; height: 100%; background: rgba(66,133,244,0.15);
+                  border-left: 1px solid rgba(66,133,244,0.5); border-right: 1px solid rgba(66,133,244,0.5);
+                  display: none; pointer-events: none; z-index: 10; }}
+      button {{ margin: 4px 4px 4px 0; padding: 4px 12px; }}
+    </style>
+  </head>
+  <body>
+    <div id="chart_container">
+      <div id="chart_div"></div>
+      <div id="overlay"></div>
+    </div>
+    <button id="backBtn" style="display:none">Back</button>
+    <button id="resetBtn" style="display:none">Reset zoom</button>
+    <p id="info"></p>
+    <p style="color:#888">Click and drag on the chart to zoom in. Source: {scores_path}</p>
+    <p style="color:#888">These are all scores computed during HNSW graph traversal, not just the final top-K results.</p>
+  </body>
+</html>
+"""
+  output_file = f"{output_dir}/{log_base_name}-hnswTraversalHistogram.html"
+  with open(output_file, "w") as f:  # noqa: FURB103
+    f.write(html)
+  print(f"Wrote HNSW traversal score histogram to {output_file}")
+
+
 def run_knn_benchmark(checkout, values, log_path):
   indexes = [0] * len(values.keys())
   indexes[-1] = -1
@@ -285,8 +1201,6 @@ def run_knn_benchmark(checkout, values, log_path):
   # dim = 100
   # doc_vectors = "%s/lucene_util/tasks/enwiki-20120502-lines-1k-100d.vec" % constants.BASE_DIR
   # query_vectors = "%s/lucene_util/tasks/vector-task-100d.vec" % constants.BASE_DIR
-
-  do_check_norms = True
 
   # Cohere Wikipedia en vectors - see cohere-v3-README.txt -- download your copy with "initial_setup.py -download"
   v3 = True
@@ -333,18 +1247,15 @@ def run_knn_benchmark(checkout, values, log_path):
   ]
 
   if DO_PROFILING:
-    cmd += [f"-XX:StartFlightRecording=dumponexit=true,maxsize=250M,settings={constants.BENCH_BASE_DIR}/src/python/profiling.jfc" + f",filename={jfr_output}"]
+    cmd += [f"-XX:StartFlightRecording=jdk.CPUTimeSample#enabled=true,dumponexit=true,maxsize=250M,settings={constants.BENCH_BASE_DIR}/src/python/profiling.jfc" + f",filename={jfr_output}"]
 
   cmd += ["knn.KnnGraphTester"]
 
   if NOISY:
     print_run_summary(values)
 
-  if NOISY:
-    print("smell vectors...")
-
-  smell_vectors(dim, doc_vectors, do_check_norms)
-  smell_vectors(dim, query_vectors, do_check_norms)
+  smell_vectors(dim, doc_vectors)
+  smell_vectors(dim, query_vectors)
 
   index_run = 1
   all_results = []
@@ -415,6 +1326,12 @@ def run_knn_benchmark(checkout, values, log_path):
       ]
     )
 
+    if DO_HNSW_SCORE_HISTOGRAM:
+      this_cmd += ["-hnswScoreHistogram"]
+
+    if DO_ALL_DISTANCES_HISTOGRAM:
+      this_cmd += ["-allDistancesHistogram", "-allDistancesSampleEveryN", str(ALL_DISTANCES_SAMPLE_EVERY_N)]
+
     if CONFIRM_SIMD_ASM_MODE:
       perf_data_file = f"perf{index_run}.data"
       print(f"NOTE: adding 'perf record' command, to {perf_data_file}, to sample instructions being executed to later confirm SIMD usage")
@@ -424,6 +1341,13 @@ def run_knn_benchmark(checkout, values, log_path):
       print(f"  cmd: {this_cmd}")
     else:
       cmd += ["-quiet"]
+
+    # hint that we will read the vectors files, to get the OS starting on the I/O now:
+    vec_size_bytes = dim * 4
+    query_start_byte = pv.get("queryStartIndex", 0) * vec_size_bytes
+    advise_will_need(query_vectors, query_start_byte, pv.get("niter", 0) * vec_size_bytes)
+    if "-reindex" in this_cmd or DO_ALL_DISTANCES_HISTOGRAM:
+      advise_will_need(doc_vectors, 0, pv.get("ndoc", 0) * vec_size_bytes)
 
     if DO_PS:
       # TODO: get k=v into log file name instead of confusing/error-prone 0, 1, 2, ...
@@ -445,7 +1369,21 @@ def run_knn_benchmark(checkout, values, log_path):
     try:
       job = subprocess.Popen(this_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, encoding="utf-8")
       re_summary = re.compile(r"^SUMMARY: (.*?)$", re.MULTILINE)
+      re_scores_path = re.compile(r"^EXACT_NN_SCORES_PATH: (.+)$")
+      re_nn_metric = re.compile(r"^EXACT_NN_METRIC: (.+)$")
+      re_hnsw_scores_path = re.compile(r"^HNSW_TRAVERSAL_SCORES_PATH: (.+)$")
+      re_hnsw_metric = re.compile(r"^HNSW_TRAVERSAL_METRIC: (.+)$")
+      re_all_distances_path = re.compile(r"^ALL_DISTANCES_SCORES_PATH: (.+)$")
+      re_all_distances_metric = re.compile(r"^ALL_DISTANCES_METRIC: (.+)$")
+      re_all_distances_sample = re.compile(r"^ALL_DISTANCES_SAMPLE_EVERY_N: (.+)$")
       summary = None
+      exact_nn_scores_path = None
+      exact_nn_metric = None
+      hnsw_traversal_scores_path = None
+      hnsw_traversal_metric = None
+      all_distances_scores_path = None
+      all_distances_metric = None
+      all_distances_sample_every_n = None
       hit_exception = False
       while job.poll() is None:
         line = job.stdout.readline()
@@ -457,6 +1395,27 @@ def run_knn_benchmark(checkout, values, log_path):
         m = re_summary.match(line)
         if m is not None:
           summary = m.group(1)
+        m = re_scores_path.match(line)
+        if m is not None:
+          exact_nn_scores_path = m.group(1).strip()
+        m = re_nn_metric.match(line)
+        if m is not None:
+          exact_nn_metric = m.group(1).strip()
+        m = re_hnsw_scores_path.match(line)
+        if m is not None:
+          hnsw_traversal_scores_path = m.group(1).strip()
+        m = re_hnsw_metric.match(line)
+        if m is not None:
+          hnsw_traversal_metric = m.group(1).strip()
+        m = re_all_distances_path.match(line)
+        if m is not None:
+          all_distances_scores_path = m.group(1).strip()
+        m = re_all_distances_metric.match(line)
+        if m is not None:
+          all_distances_metric = m.group(1).strip()
+        m = re_all_distances_sample.match(line)
+        if m is not None:
+          all_distances_sample_every_n = int(m.group(1).strip())
         if "Exception in" in line:
           hit_exception = True
     finally:
@@ -484,9 +1443,19 @@ def run_knn_benchmark(checkout, values, log_path):
       raise RuntimeError(f"command failed with exit {job.returncode}")
     if summary is None:
       raise RuntimeError("could not find summary line in output! ")
+
+    if exact_nn_scores_path is not None:
+      generate_exact_nn_histogram(exact_nn_scores_path, log_dir_name, log_file_name, exact_nn_metric)
+
+    if hnsw_traversal_scores_path is not None:
+      generate_hnsw_traversal_histogram(hnsw_traversal_scores_path, log_dir_name, log_file_name, hnsw_traversal_metric)
+
+    if all_distances_scores_path is not None:
+      generate_all_distances_histogram(all_distances_scores_path, log_dir_name, log_file_name, all_distances_metric, all_distances_sample_every_n)
+
     all_results.append((summary, args))
     if DO_PROFILING:
-      benchUtil.profilerOutput(constants.JAVA_EXE, jfr_output, benchUtil.checkoutToPath(checkout), 30, (1,))
+      benchUtil.profilerOutput(constants.JAVA_EXE, jfr_output, benchUtil.checkoutToPath(checkout), 30, (1, 4, 12))
     index_run += 1
 
   if NOISY:
@@ -829,6 +1798,130 @@ def print_mem_info():
 
   print(f"  dirty RAM: {format_memory_kb(mem_dirty) if mem_dirty != 'unknown' else 'unknown'}")
   print()
+
+
+def build_java_base_cmd(checkout):
+  """Build the base Java command (JVM flags + classpath) for KnnGraphTester."""
+  cp = benchUtil.classPathToString(benchUtil.getClassPath(checkout) + (f"{constants.BENCH_BASE_DIR}/build",))
+  cmd = constants.JAVA_EXE.split(" ") + [
+    "-cp",
+    cp,
+    "--add-modules",
+    "jdk.incubator.vector",
+    "--enable-native-access=ALL-UNNAMED",
+    f"-Djava.util.concurrent.ForkJoinPool.common.parallelism={multiprocessing.cpu_count()}",
+    "-XX:+UnlockDiagnosticVMOptions",
+    "-XX:+DebugNonSafepoints",
+  ]
+  cmd += ["knn.KnnGraphTester"]
+  return cmd
+
+
+def build_knn_args_from_params(params):
+  """Convert a flat dict of param_name->value into the arg list for KnnGraphTester."""
+  args = []
+  quantize_bits = None
+  do_quantize_compress = False
+  for p, value in params.items():
+    if p == "quantizeBits":
+      if value != 32:
+        args += ["-quantize", "-quantizeBits", str(value)]
+        quantize_bits = value
+    elif p == "quantizeCompress":
+      do_quantize_compress = value
+    elif isinstance(value, bool):
+      if value:
+        args += ["-" + p]
+    else:
+      args += ["-" + p, str(value)]
+
+  if quantize_bits == 4 and do_quantize_compress:
+    args += ["-quantizeCompress"]
+
+  return args
+
+
+def run_single_knn_iteration(checkout, params, dim, doc_vectors, query_vectors, work_dir, extra_java_args=None):
+  """Run a single KNN benchmark iteration in work_dir.  Always reindexes.
+
+  params: flat dict of param_name -> single value (not tuple)
+  Returns (summary_string, full_output_string) or raises on failure.
+  """
+  base_cmd = build_java_base_cmd(checkout)
+  knn_args = build_knn_args_from_params(params)
+
+  full_cmd = (
+    base_cmd
+    + knn_args
+    + [
+      "-dim",
+      str(dim),
+      "-docs",
+      str(doc_vectors),
+      "-reindex",
+      "-search-and-stats",
+      str(query_vectors),
+      "-numIndexThreads",
+      "8",
+    ]
+  )
+
+  if extra_java_args is not None:
+    full_cmd += extra_java_args
+
+  print(f"[variance] running in {work_dir}")
+  print(f"[variance] cmd: {full_cmd}")
+
+  os.makedirs(work_dir, exist_ok=True)
+
+  job = subprocess.Popen(
+    full_cmd,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.STDOUT,
+    encoding="utf-8",
+    cwd=str(work_dir),
+  )
+
+  output_lines = []
+  re_summary = re.compile(r"^SUMMARY: (.*?)$", re.MULTILINE)
+  summary = None
+  hit_exception = False
+
+  while job.poll() is None:
+    line = job.stdout.readline()
+    if not line:
+      continue
+    output_lines.append(line)
+    sys.stdout.write(line)
+    sys.stdout.flush()
+    m = re_summary.match(line)
+    if m is not None:
+      summary = m.group(1)
+    if "Exception in" in line:
+      hit_exception = True
+
+  # drain remaining output
+  for line in job.stdout:
+    output_lines.append(line)
+    sys.stdout.write(line)
+    sys.stdout.flush()
+    m = re_summary.match(line)
+    if m is not None:
+      summary = m.group(1)
+    if "Exception in" in line:
+      hit_exception = True
+
+  full_output = "".join(output_lines)
+
+  if hit_exception:
+    raise RuntimeError(f"java exception in {work_dir}:\n{full_output}")
+  job.wait()
+  if job.returncode != 0:
+    raise RuntimeError(f"command failed with exit {job.returncode} in {work_dir}:\n{full_output}")
+  if summary is None:
+    raise RuntimeError(f"could not find SUMMARY line in output from {work_dir}:\n{full_output}")
+
+  return summary, full_output
 
 
 def run_n_knn_benchmarks(LUCENE_CHECKOUT, PARAMS, n, log_path):
